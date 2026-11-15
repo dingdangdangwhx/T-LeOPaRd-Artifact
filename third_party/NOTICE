@@ -1,0 +1,13 @@
+LaZer: IBM, MIT license in ../LICENSE.
+Labrador: IBM, Apache-2.0; attribution in nizk1/LICENSE.
+Intel HEXL 1.2.5: Intel Corporation, Apache-2.0; hexl/LICENSE.
+Google cpu_features 0.6.0: Apache-2.0; cpu_features/LICENSE.
+Legacy LWE estimator: Martin R. Albrecht and contributors, LGPL-3.0-or-later.
+  Source: https://bitbucket.org/malb/lwe-estimator, commit c50ab18d53ae.
+  estimator.py SHA-256:
+  fcb4846093f1a2117ac8703b757b47c1121227cfa223199da2b10045044d6568
+
+Local integration includes the NIZK1 client relation and compression frontend,
+NIZK2 server relations, q72 arithmetic, parameter selection, arithmetic/proof
+optimizations, serialization, and the offline CPU-feature build dependency.
+The respective license terms remain applicable to the included dependencies.

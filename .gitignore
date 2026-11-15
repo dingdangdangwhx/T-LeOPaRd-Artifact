@@ -1,0 +1,15 @@
+/build/
+/results/
+/liblazer.a
+/.artifact.lock
+/src/protocol/threshold-client
+/src/protocol/threshold-server
+/src/protocol/semi-honest-bench
+/src/protocol/nizk2-check
+/src/protocol/.build-config*
+__pycache__/
+*.pyc
+*.sage.py
+*.tmp
+/third_party/hexl/cmake/hexl-*/HEXLConfig.cmake
+/third_party/hexl/pkgconfig/hexl.pc
