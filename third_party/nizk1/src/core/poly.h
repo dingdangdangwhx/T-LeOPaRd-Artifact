@@ -65,6 +65,7 @@ void polyvec_poly_pointwise(poly *r, const poly *a, const poly *b, size_t len, s
 void poly_pointwise_add(poly *r, const poly *a, const poly *b, const pdata *prime);
 void polyvec_pointwise_add(poly *r, const poly *a, const poly *b, size_t len, size_t stride, const pdata *prime);
 void polyvec_poly_pointwise_add(poly *r, const poly *a, const poly *b, size_t len, size_t stride, const pdata *prime);
+void polyvec_poly_pointwise_add_reduce(poly *r, const poly *a, const poly *b, size_t len, size_t stride, const pdata *prime);
 void polyvec_sprod_pointwise(poly *r, const poly *a, const poly *b, size_t len, size_t stride, const pdata *prime);
 void polyvec_sprod_pointwise_add(poly *r, const poly *a, const poly *b, size_t len, size_t stride, const pdata *prime);
 

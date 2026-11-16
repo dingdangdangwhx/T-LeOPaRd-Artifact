@@ -352,7 +352,7 @@ static void usage(const char *prog) {
           "  %s setup <pp.bin>\n"
           "  %s preproc-client <pp.bin> <slot_count> <preq.bin> <pre_state.bin>\n"
           "  %s request <pp.bin> <pre_state.bin> <nservers> <threshold> <q_spec> <tag_hex> <x_hex> <req.bin> <st.bin>\n"
-          "  %s verify-request <pp.bin> <tag_hex> <req.bin>\n"
+          "  %s verify-request <pp.bin> <tag_hex> <req.bin> [cached-preq.bin]\n"
           "  %s finalize <st.bin> <prep_dir> <rep_dir>\n"
           "  %s eval <pp.bin> <tag_hex> <x_hex> <master.bin>\n",
           prog,prog,prog,prog,prog,prog);
@@ -382,7 +382,8 @@ int main(int argc, char **argv) {
       char *end;
       unsigned long long offset=strtoull(bench_seed,&end,10);
       if(!*bench_seed || *end) return 1;
-      /* Public benchmark fixture only; never used for private sampling. */
+      /* Deterministic benchmark fixture; this harness also derives prover
+         sampling from it and is not a production randomness design. */
       for(size_t i=0;i<16;i++) pp.nizk1_seed[i]=(uint8_t)i;
       unsigned int carry=0;
       for(size_t i=0;i<16;i++) {
@@ -466,6 +467,8 @@ int main(int argc, char **argv) {
     req.nservers = nservers;
     req.threshold = threshold;
     req.q_mask = q_mask;
+    req.cr_external = getenv("LEOPARD_REQUEST_CACHED_PREPROC") &&
+                      strcmp(getenv("LEOPARD_REQUEST_CACHED_PREPROC"),"1") == 0;
     st.nservers = nservers;
     st.threshold = threshold;
     st.q_mask = q_mask;
@@ -494,6 +497,9 @@ int main(int argc, char **argv) {
       printf("slot_j=%zu\n",req.slot_j);
       printf("q_mask=0x%llx\n",(unsigned long long)q_mask);
       printf("req_bytes=%zu\n",req_file_bytes);
+      printf("req_cached_preprocessing=%d\n",req.cr_external);
+      printf("req_cr_omitted_bytes=%zu\n",req.cr_external ?
+          packed_i64_wire_bytes(req.cr_coeffs,req.cr_rows*LEOPARD_RING_DEG) : 0);
       printf("req_public_bytes=%zu\n",req_public_bytes);
       printf("req_public_cx_bytes=%zu\n",req_cx_bytes);
       printf("req_public_other_bytes=%zu\n",
@@ -544,9 +550,10 @@ int main(int argc, char **argv) {
   if(strcmp(argv[1],"verify-request") == 0) {
     leopard_pp pp;
     leopard_request_data req = {0};
+    leopard_preq_data cached = {0};
     uint8_t tag[LEOPARD_TAG_BYTES];
 
-    if(argc != 5) {
+    if(argc != 5 && argc != 6) {
       usage(argv[0]);
       return 1;
     }
@@ -556,6 +563,16 @@ int main(int argc, char **argv) {
       return 1;
     }
     clock_gettime(CLOCK_MONOTONIC,&t0);
+    /* Cache lookup is timed and never replaces the proof verification. */
+    if((req.cr_external && argc != 6) ||
+       (argc == 6 && (leopard_read_preq_file(argv[5],&cached) != 0 ||
+                     leopard_request_attach_preprocessing(&req,&cached) != 0))) {
+      leopard_preq_data_clear(&cached);
+      leopard_request_data_clear(&req);
+      fprintf(stderr,"missing or mismatched preprocessed commitment\n");
+      return 1;
+    }
+    leopard_preq_data_clear(&cached);
     rc = leopard_nizk1_request_verify_data(&pp,tag,sizeof(tag),&req);
     clock_gettime(CLOCK_MONOTONIC,&t1);
     sec = elapsed_sec_ts(&t0,&t1);

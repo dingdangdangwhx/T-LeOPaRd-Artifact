@@ -106,12 +106,12 @@ size_t qugarbage_raw(polx *u, poly *g, size_t r, size_t n, const polx s[r][n],
 void commit(statement *ost, witness *owt, proof *pi, polx sx[ost->r][ost->n], const witness *iwt);
 void reduce_commit(statement *ost, const proof *pi);
 
-int project(statement *ost, proof *pi, uint8_t jlmat[][ost->n][256*N/8], const witness *iwt);
-int reduce_project(statement *ost, uint8_t jlmat[][ost->n][256*N/8], const proof *pi, size_t r, uint64_t betasq);
+int project(statement *ost, proof *pi, uint8_t jlmat[][ost->n][JL_BYTES], const witness *iwt);
+int reduce_project(statement *ost, uint8_t jlmat[][ost->n][JL_BYTES], const proof *pi, size_t r, uint64_t betasq);
 
 void collaps_jlproj_raw(constraint *cnst, size_t r, size_t n, uint8_t h[16], const int32_t p[256],
-                       const uint8_t jlmat[r][n][256*N/8]);
-void collaps_jlproj(constraint *cnst, statement *st, const proof *pi, const uint8_t jlmat[st->r][st->n][256*N/8]);
+                       const uint8_t jlmat[r][n][JL_BYTES]);
+void collaps_jlproj(constraint *cnst, statement *st, const proof *pi, const uint8_t jlmat[st->r][st->n][JL_BYTES]);
 void lift_aggregate_zqcnst(statement *ost, proof *pi, size_t i, constraint *cnst, const polx sx[ost->r][ost->n]);
 void reduce_lift_aggregate_zqcnst(statement *ost, const proof *pi, size_t i, const constraint *cnst);
 

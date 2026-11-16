@@ -761,6 +761,32 @@ void polyvec_poly_pointwise_add(poly *r, const poly *a, const poly *b, size_t le
   }
 }
 
+void polyvec_poly_pointwise_add_reduce(poly *r, const poly *a, const poly *b,
+                                      size_t len, size_t stride, const pdata *prime) {
+  __m512i al[N/32], ah[N/32];
+  const __m512i p = _mm512_set1_epi16(prime->p);
+  const __m512i pinv = _mm512_set1_epi16(prime->pinv);
+  const __m512i v = _mm512_set1_epi16(prime->v);
+  const __m512i shift = _mm512_set1_epi16(1 << (16+15-27));
+  for(size_t j=0;j<N/32;j++) {
+    ah[j] = _mm512_load_si512(&a->vec->v[j]);
+    al[j] = _mm512_mullo_epi16(ah[j],pinv);
+  }
+  for(size_t i=0;i<len;i++) for(size_t j=0;j<N/32;j++) {
+    __m512i f = _mm512_load_si512(&b[stride*i].vec->v[j]);
+    __m512i g = _mm512_mullo_epi16(f,al[j]);
+    f = _mm512_mulhi_epi16(f,ah[j]);
+    g = _mm512_mulhi_epi16(g,p);
+    f = _mm512_add_epi16(_mm512_load_si512(&r[stride*i].vec->v[j]),
+                         _mm512_sub_epi16(f,g));
+    /* Preserve the old signed-lane addition and Barrett reduction exactly. */
+    g = _mm512_mulhi_epi16(f,v);
+    g = _mm512_mulhrs_epi16(g,shift);
+    f = _mm512_sub_epi16(f,_mm512_mullo_epi16(g,p));
+    _mm512_store_si512(&r[stride*i].vec->v[j],f);
+  }
+}
+
 void polyvec_sprod_pointwise(poly *r, const poly *a, const poly *b, size_t len, size_t stride, const pdata *prime) {
   size_t i;
   const int extrared = (prime->p & 0x2000) ? 1 : 0;

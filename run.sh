@@ -32,6 +32,7 @@ export OMP_NUM_THREADS="$threads"
 export LEOPARD_PUBLIC_THREADS="${LEOPARD_PUBLIC_THREADS:-$threads}"
 export LEOPARD_PARALLEL_BLINDEVAL=0
 export LEOPARD_PARALLEL_VERIFY_REPLIES=1
+export LEOPARD_REQUEST_CACHED_PREPROC=0
 export NSERVERS=3 THRESHOLD=2 Q_SPEC=0,2 SLOTS=10
 {
   uname -a
@@ -40,9 +41,11 @@ export NSERVERS=3 THRESHOLD=2 Q_SPEC=0,2 SLOTS=10
   gcc --version
   g++ --version
   cmake --version
+  git -C "$root" rev-parse HEAD 2>/dev/null || true
   printf 'RUNS=%s\nOMP_NUM_THREADS=%s\nLEOPARD_PUBLIC_THREADS=%s\nLEOPARD_PARALLEL_BLINDEVAL=0\n' \
     "$runs" "$threads" "$LEOPARD_PUBLIC_THREADS"
 } > "$out/system.txt"
+python3 "$root/parameters/client_screen.py" > "$out/client-parameters.json"
 trap 'printf "Run failed; inspect logs in %s\n" "$out" >&2' ERR
 
 printf 'Building proof backend...\n'

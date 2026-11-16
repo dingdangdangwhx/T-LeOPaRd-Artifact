@@ -11,6 +11,7 @@ enum {
   LEOPARD_MAGIC_PST = ((LEOPARD_LOGQ > 64 ? 0x00800000U : 0) ^ (0x50535431U)),
   LEOPARD_MAGIC_SPS = ((LEOPARD_LOGQ > 64 ? 0x00800000U : 0) ^ (0x53505331U)),
   LEOPARD_MAGIC_REQ = ((LEOPARD_LOGQ > 64 ? 0x00800000U : 0) ^ (0x52455131U)),
+  LEOPARD_MAGIC_REQ_CACHED = ((LEOPARD_LOGQ > 64 ? 0x00800000U : 0) ^ (0x52455132U)),
   LEOPARD_MAGIC_ST = ((LEOPARD_LOGQ > 64 ? 0x00800000U : 0) ^ (0x53544131U)),
   LEOPARD_MAGIC_PK = ((LEOPARD_LOGQ > 64 ? 0x00800000U : 0) ^ (NIZK2_DOUBLE_COMMITMENT ? 0x504b5933U : (NIZK2_SMALL_COMMITMENT ? 0x504b5932U : 0x504b5931U))),
   LEOPARD_MAGIC_SK = ((LEOPARD_LOGQ > 64 ? 0x00800000U : 0) ^ (NIZK2_DOUBLE_COMMITMENT ? 0x534b5932U : 0x534b5931U)),
@@ -581,7 +582,7 @@ fail:
 
 int leopard_write_request_file(const char *path, const leopard_request_data *req) {
   FILE *fp;
-  uint32_t magic = LEOPARD_MAGIC_REQ;
+  uint32_t magic = req->cr_external ? LEOPARD_MAGIC_REQ_CACHED : LEOPARD_MAGIC_REQ;
 
   if(open_write(&fp,path) != 0)
     return 1;
@@ -598,7 +599,7 @@ int leopard_write_request_file(const char *path, const leopard_request_data *req
      write_u64(fp,req->proof_len) != 0 ||
      write_u64(fp,req->outer_betasq) != 0 ||
      write_bytes(fp,req->ar_seed,sizeof(req->ar_seed)) != 0 ||
-     write_packed_i64_array(fp,req->cr_coeffs,req->cr_rows * LEOPARD_RING_DEG) != 0 ||
+     (!req->cr_external && write_packed_i64_array(fp,req->cr_coeffs,req->cr_rows * LEOPARD_RING_DEG) != 0) ||
      write_packed_i64_array(fp,req->cx_coeffs,req->cx_rows * req->cx_cols * LEOPARD_RING_DEG) != 0 ||
      write_packed_i64_array(fp,req->tA_coeffs,req->kmsis * LEOPARD_RING_DEG) != 0 ||
      write_packed_i64_array(fp,req->w_coeffs,req->kmsis * LEOPARD_RING_DEG) != 0 ||
@@ -622,12 +623,14 @@ int leopard_read_request_file(const char *path, leopard_request_data *req) {
   memset(req,0,sizeof(*req));
   if(open_read(&fp,path) != 0)
     return 1;
-  if(read_bytes(fp,&magic,sizeof(magic)) != 0 || magic != LEOPARD_MAGIC_REQ ||
+  if(read_bytes(fp,&magic,sizeof(magic)) != 0 ||
+     (magic != LEOPARD_MAGIC_REQ && magic != LEOPARD_MAGIC_REQ_CACHED) ||
      read_u64(fp,&rows64) != 0) {
     fclose(fp);
     return 1;
   }
   req->nservers = (size_t)rows64;
+  req->cr_external = magic == LEOPARD_MAGIC_REQ_CACHED;
   if(read_u64(fp,&rows64) != 0) goto fail;
   req->threshold = (size_t)rows64;
   if(read_u64(fp,&rows64) != 0) goto fail;
@@ -650,7 +653,8 @@ int leopard_read_request_file(const char *path, leopard_request_data *req) {
   req->outer_betasq = rows64;
   if(read_bytes(fp,req->ar_seed,sizeof(req->ar_seed)) != 0) goto fail;
 
-  req->cr_coeffs = alloc_i64(req->cr_rows * LEOPARD_RING_DEG);
+  if(!req->cr_external)
+    req->cr_coeffs = alloc_i64(req->cr_rows * LEOPARD_RING_DEG);
   req->cx_coeffs = alloc_i64(req->cx_rows * req->cx_cols * LEOPARD_RING_DEG);
   req->tA_coeffs = alloc_i64(req->kmsis * LEOPARD_RING_DEG);
   req->w_coeffs = alloc_i64(req->kmsis * LEOPARD_RING_DEG);
@@ -660,12 +664,12 @@ int leopard_read_request_file(const char *path, leopard_request_data *req) {
   req->tq_coeffs = alloc_i64(LEOPARD_RING_DEG);
   req->vq_coeffs = alloc_i64(LEOPARD_RING_DEG);
   req->proof = alloc_u8(req->proof_len);
-  if(req->cr_coeffs == NULL || req->cx_coeffs == NULL || req->tA_coeffs == NULL ||
+  if((!req->cr_external && req->cr_coeffs == NULL) || req->cx_coeffs == NULL || req->tA_coeffs == NULL ||
      req->w_coeffs == NULL || req->rbit_const_tg_coeffs == NULL ||
      req->rbit_const_h_coeffs == NULL || req->vlin_coeffs == NULL || req->tq_coeffs == NULL ||
      req->vq_coeffs == NULL || req->proof == NULL)
     goto fail;
-  if(read_packed_i64_array(fp,req->cr_coeffs,req->cr_rows * LEOPARD_RING_DEG) != 0 ||
+  if((!req->cr_external && read_packed_i64_array(fp,req->cr_coeffs,req->cr_rows * LEOPARD_RING_DEG) != 0) ||
      read_packed_i64_array(fp,req->cx_coeffs,req->cx_rows * req->cx_cols * LEOPARD_RING_DEG) != 0 ||
      read_packed_i64_array(fp,req->tA_coeffs,req->kmsis * LEOPARD_RING_DEG) != 0 ||
      read_packed_i64_array(fp,req->w_coeffs,req->kmsis * LEOPARD_RING_DEG) != 0 ||
@@ -682,6 +686,23 @@ fail:
   fclose(fp);
   leopard_request_data_clear(req);
   return 1;
+}
+
+int leopard_request_attach_preprocessing(leopard_request_data *req, const leopard_preq_data *preq) {
+  if(!preq || !preq->cr_coeffs || !preq->ar_seeds ||
+     req->slot_j >= preq->slot_count || req->cr_rows != preq->cr_rows ||
+     req->cr_rows > SIZE_MAX/(LEOPARD_RING_DEG*sizeof(leopard_coeff)) ||
+     memcmp(req->ar_seed,preq->ar_seeds+16*req->slot_j,16))
+    return 1;
+  const size_t count=req->cr_rows*LEOPARD_RING_DEG;
+  const leopard_coeff *expected=preq->cr_coeffs+req->slot_j*count;
+  if(req->cr_coeffs)
+    return memcmp(req->cr_coeffs,expected,count*sizeof(*expected)) != 0;
+  if(!req->cr_external) return 1;
+  req->cr_coeffs=alloc_i64(count);
+  if(!req->cr_coeffs) return 1;
+  memcpy(req->cr_coeffs,expected,count*sizeof(*expected));
+  return 0;
 }
 
 int leopard_write_state_file(const char *path, const leopard_state_data *st) {

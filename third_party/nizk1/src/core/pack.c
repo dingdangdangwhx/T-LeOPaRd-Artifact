@@ -291,6 +291,12 @@ int composite_prove_principle(composite *p, const prncplstmnt *st, const witness
   t = clock();
   t0 = clock();
   ret = principle_prove(tst,twt,p->pi[p->l],st,wt,0);
+#if PACK_RELATION_DEBUG
+  if(!ret) {
+    ret = verify(tst,twt);
+    fprintf(stderr,"DEBUG initial principle output: %d\n",ret);
+  }
+#endif
   prof.initial_prove_s = (double)(clock() - t0) / CLOCKS_PER_SEC;
   if(ret)
     goto err;

@@ -6,6 +6,8 @@
 /src/protocol/threshold-server
 /src/protocol/semi-honest-bench
 /src/protocol/nizk2-check
+/src/protocol/nizk1-check
+/src/protocol/arithmetic-check
 /src/protocol/.build-config*
 __pycache__/
 *.pyc

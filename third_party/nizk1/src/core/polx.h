@@ -59,6 +59,9 @@ void polxvec_scale(polx *r, const polx *a, size_t len, labrador_scalar s);
 void polxvec_scale_frompolyvec(polx *r, const poly *a, size_t len, labrador_scalar s);
 void polx_scale_add(polx *r, const polx *a, labrador_scalar s);
 void polxvec_scale_add(polx *r, const polx *a, size_t len, labrador_scalar s);
+#if LOGQ == 72
+void polxvec_scale_add_modq(polx *r, const polx *a, size_t len, labrador_scalar s);
+#endif
 
 void polxvec_decompose(poly *r, const polx *a, size_t len, size_t t, size_t d);
 void polxvec_reconstruct(polx *r, const poly *a, size_t len, size_t t, size_t d);

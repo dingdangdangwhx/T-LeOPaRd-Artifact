@@ -1,12 +1,18 @@
 #define _POSIX_C_SOURCE 200809L
+#include "src/core/aesctr.h"
 #ifndef DEMO_L
 #define DEMO_L 80
 #endif
 #ifndef LOGQ
 #define LOGQ 48
 #endif
+#ifndef LEOPARD_PROOF_FREE
+#define LEOPARD_PROOF_FREE 0
+#endif
 #ifndef DEMO_M
-#if LOGQ >= 64
+#if LOGQ == 72
+#define DEMO_M 42
+#elif LOGQ >= 64
 #define DEMO_M 37
 #elif LOGQ >= 56
 #define DEMO_M 34
@@ -25,7 +31,9 @@
 #define Y_SPLIT_GAMMA 200
 #endif
 #ifndef LNP22_KMSIS
-#if LOGQ >= 64
+#if LOGQ == 72
+#define LNP22_KMSIS 24
+#elif LOGQ >= 64
 #define LNP22_KMSIS 23
 #elif LOGQ >= 56
 #define LNP22_KMSIS 25
@@ -34,7 +42,9 @@
 #endif
 #endif
 #ifndef LNP22_M2
-#if LOGQ >= 64
+#if LOGQ == 72
+#define LNP22_M2 74
+#elif LOGQ >= 64
 #define LNP22_M2 64
 #elif LOGQ >= 56
 #define LNP22_M2 62
@@ -43,7 +53,9 @@
 #endif
 #endif
 #ifndef UMC_ELL
-#if LOGQ >= 64
+#if LOGQ == 72
+#define UMC_ELL 45
+#elif LOGQ >= 64
 #define UMC_ELL 40
 #elif LOGQ >= 56
 #define UMC_ELL 38
@@ -79,7 +91,9 @@
 #define LNP22_ENABLE_REJECTION 1
 #endif
 #ifndef LNP22_DEFAULT_SEED_OFFSET
-#if LOGQ >= 64
+#if LOGQ == 72
+#define LNP22_DEFAULT_SEED_OFFSET 2
+#elif LOGQ >= 64
 #define LNP22_DEFAULT_SEED_OFFSET 11
 #elif LOGQ >= 56
 #define LNP22_DEFAULT_SEED_OFFSET 2
@@ -88,8 +102,13 @@
 #endif
 #endif
 #ifndef LNP22_RBIT_CONSTCHECK_LAMBDA
-#define LNP22_RBIT_CONSTCHECK_LAMBDA LIFTS
+#define LNP22_RBIT_CONSTCHECK_LAMBDA (LIFTS+2)
 #endif
+#define RBIT_ARP_ROWS 2
+#define RBIT_CONST_ROWS LIFTS
+#define RBIT_ARP_LOGSIGMA 20
+#define RBIT_ARP_LIMIT ((int64_t)1<<25)
+#define RBIT_ARP_SIGMA (1.55*(1ULL<<RBIT_ARP_LOGSIGMA))
 #ifndef LNP22_PROVE_X_BITS
 #define LNP22_PROVE_X_BITS 1
 #endif
@@ -143,6 +162,12 @@
   (LNP22_RHAT_BINARY_BACKEND == LNP22_RHAT_BINARY_BACKEND_RBIT)
 #define LNP22_USE_NATIVE_FOLD_BINARY \
   (LNP22_RHAT_BINARY_BACKEND == LNP22_RHAT_BINARY_BACKEND_NATIVE_FOLD)
+#if LNP22_USE_RBIT_BINARY && !LNP22_DIRECT_CHAIN
+#error "Weighted RBIT requires the direct-chain inner/outer frontend"
+#endif
+#if !LNP22_USE_RBIT_BINARY || !LNP22_PROVE_X_BITS
+#error "The binary-opening experiment requires scalar-bit and constantness proofs"
+#endif
 #define LNP22_ENABLE_RBIT_CONSTCHECK \
   (LNP22_RBIT_CONSTCHECK_LAMBDA > 0 && \
    (LNP22_USE_RBIT_BINARY || LNP22_USE_NATIVE_FOLD_BINARY || LNP22_PROVE_X_BITS))
@@ -180,16 +205,16 @@ enum {
 };
 
 enum {
-  NONCE_UMC_A_BASE = 1000,
-  NONCE_UMC_B_BASE = 1100,
+  NONCE_UMC_A_BASE = 0x01000000,
+  NONCE_UMC_B_BASE = 0x02000000,
   NONCE_UMC_EUA_BASE = 1200,
   NONCE_UMC_EUB_BASE = 1300,
   NONCE_UMC_R_BASE = 1400,
   NONCE_RHAT_BASE = 1500,
   NONCE_AR_BASE = 1600,
-  NONCE_LNP_A1_BASE = 2000,
-  NONCE_LNP_A2_BASE = 3000,
-  NONCE_LNP_A3_BASE = 4000,
+  NONCE_LNP_A1_BASE = 0x10000000,
+  NONCE_LNP_A2_BASE = 0x20000000,
+  NONCE_LNP_A3_BASE = 0x30000000,
   NONCE_LINFOLD_BASE = 5000,
   NONCE_S2_BASE = 6000,
   NONCE_Y1_BASE = 7000,
@@ -202,7 +227,11 @@ enum {
 };
 
 #ifndef UMC_MODP
+#if LEOPARD_PROOF_FREE
 #define UMC_MODP 769
+#else
+#define UMC_MODP 65437
+#endif
 #endif
 
 #ifndef UMC_MSG_SCALE
@@ -210,12 +239,29 @@ enum {
 #endif
 
 #ifndef UMC_N
+#if LEOPARD_PROOF_FREE
 #define UMC_N 7
+#else
+#define UMC_N 14
+#endif
 #endif
 
 #ifndef UMC_K
+#if LEOPARD_PROOF_FREE
 #define UMC_K 7
+#else
+#define UMC_K 14
 #endif
+#endif
+
+#if !LEOPARD_PROOF_FREE
+_Static_assert(LOGQ == 72 && UMC_MODP == 65437 && UMC_N == 14 && UMC_K == 14,
+               "compact lifting requires its audited q72 commitment parameters");
+#else
+_Static_assert(LOGQ == 56 || LOGQ == 64, "unsupported proof-free profile");
+#endif
+_Static_assert(LNP22_RBIT_CONSTCHECK_LAMBDA > 0,
+               "binary opening requires masked constantness checks");
 
 typedef struct {
   size_t Lchain;
@@ -247,6 +293,7 @@ typedef struct {
   size_t nlin;
   size_t rbit_const_lambda;
   int cache_a1open;
+  uint8_t prechallenge_seed[16];
 
   poly *witness[LNP22_NUM_BLOCKS];
   polx *s1;
@@ -267,6 +314,7 @@ typedef struct {
   polx *alphavec;
   polx *directfold;
   polx *xbit_weight;
+  polx *rbit_weight;
   polx *directD;
   polx *direct_lin_B;
   polx *g0;
@@ -460,11 +508,22 @@ static void sample_autostable_polx(polx *r, const uint8_t seed[32], uint64_t non
   shake128_inc_absorb(&st,in,sizeof(in));
   shake128_inc_finalize(&st);
 
-  poly_set_zero(tmp);
-  for(i=0;i<nchal;i++) {
-    chal[i] = (int64_t)shake_uniform_mod(&st,mod) - bound;
-    tmp->vec->c[i] = (int16_t)chal[i];
+  /* Auto-stable challenges have real eigenvalues at the odd 128th roots.
+     Keep an explicit numerical margin below the parameter-screen eta. */
+  for(;;) {
+    int accept=1;
+    for(i=0;i<nchal;i++)
+      chal[i]=(int64_t)shake_uniform_mod(&st,mod)-bound;
+    for(size_t root=0;root<N/2;root++) {
+      long double value=chal[0];
+      const long double theta=acosl(-1.0L)*(2*root+1)/N;
+      for(i=1;i<nchal;i++) value+=2*chal[i]*cosl(theta*i);
+      if(fabsl(value)>127.0L-0.000001L) { accept=0; break; }
+    }
+    if(accept) break;
   }
+  poly_set_zero(tmp);
+  for(i=0;i<nchal;i++) tmp->vec->c[i]=(int16_t)chal[i];
   tmp->vec->c[nchal] = 0;
   for(i=nchal+1;i<N;i++)
     tmp->vec->c[i] = (int16_t)(-chal[2*nchal - i]);
@@ -590,24 +649,12 @@ static uint64_t shake_squeeze_u64(shake128incctx *st) {
 }
 
 static void sample_zero_const_polx(polx *r, const uint8_t seed[16], uint64_t nonce) {
-  shake128incctx st;
-  uint8_t in[24];
-  int64_t coeffs[N];
-  const unsigned int bits = (LOGQ >= 62) ? 62u : (unsigned int)(LOGQ - 1);
-  const uint64_t mask = (((uint64_t)1) << bits) - 1u;
-  const int64_t center = (int64_t)(((uint64_t)1) << (bits - 1));
-  size_t i;
+  polz uniform[1];
 
-  memcpy(in,seed,16);
-  store_u64_le(&in[16],nonce);
-  shake128_inc_init(&st);
-  shake128_inc_absorb(&st,in,sizeof(in));
-  shake128_inc_finalize(&st);
-
-  coeffs[0] = 0;
-  for(i=1;i<N;i++)
-    coeffs[i] = (int64_t)(shake_squeeze_u64(&st) & mask) - center;
-  polxvec_fromint64vec(r,1,1,coeffs);
+  /* The mask must cover the full zero-constant subspace, including q > 2^64. */
+  polzvec_uniform(uniform,1,seed,nonce);
+  polz_setcoeff_fromint64(uniform,0,0);
+  polz_topolx(r,uniform);
 }
 
 static double shake_uniform01(shake128incctx *st) {
@@ -655,10 +702,25 @@ static void absorb_rbit_const_transcript(shake128incctx *st, const selector_lnp2
   absorb_polxvec(st,ctx->rbit_const_h,ctx->rbit_const_lambda);
 }
 
+static void polxvec_centered_to_i128(__int128 *, const polx *, size_t);
+
 static int validate_rbit_const_transcript(const selector_lnp22_ctx *ctx) {
   size_t row;
 
-  for(row=0;row<ctx->rbit_const_lambda;row++) {
+  const unsigned __int128 q = ((unsigned __int128)1<<LOGQ)-QOFF;
+  const unsigned __int128 b = 2*(unsigned __int128)RBIT_ARP_LIMIT;
+  /* Lemma 2.7 bounds every centered scalar by 2*LIMIT. */
+  if(ctx->rbit_const_lambda != RBIT_CONST_ROWS+RBIT_ARP_ROWS ||
+     (unsigned __int128)ctx->rhat_bits_len*b*(b+1) >= q)
+    return 1;
+  for(row=RBIT_CONST_ROWS;row<ctx->rbit_const_lambda;row++) {
+    __int128 coeffs[N];
+    polxvec_centered_to_i128(coeffs,&ctx->rbit_const_h[row],1);
+    for(size_t j=0;j<N;j++)
+      if(coeffs[j] < -RBIT_ARP_LIMIT || coeffs[j] > RBIT_ARP_LIMIT)
+        return 1;
+  }
+  for(row=0;row<RBIT_CONST_ROWS;row++) {
     if(!polx_iszero_constcoeff(&ctx->rbit_const_h[row])) {
       fprintf(stderr,
               "ERROR: coefficient-constantness response h[%zu] has non-zero constant coefficient\n",
@@ -669,6 +731,19 @@ static int validate_rbit_const_transcript(const selector_lnp22_ctx *ctx) {
   return 0;
 }
 
+static void bind_prechallenge_commitment(selector_lnp22_ctx *ctx, const polx *tA) {
+  shake128incctx st;
+  if(!LNP22_DIRECT_CHAIN)
+    return;
+  shake128_inc_init(&st);
+  absorb_bytes(&st,"selector-precommit-v1",21);
+  absorb_bytes(&st,ctx->selector_chal_seed,16);
+  absorb_polxvec(&st,tA,ctx->kmsis);
+  shake128_inc_finalize(&st);
+  shake128_inc_squeeze(ctx->prechallenge_seed,16,&st);
+  polxvec_challenge(ctx->kprime,ctx->gdigits,ctx->prechallenge_seed,64);
+}
+
 static void derive_rbit_const_seed(selector_lnp22_ctx *ctx) {
   shake128incctx st;
 
@@ -676,7 +751,9 @@ static void derive_rbit_const_seed(selector_lnp22_ctx *ctx) {
     return;
 
   shake128_inc_init(&st);
-  absorb_bytes(&st,"selector-rbit-const-phi",24);
+  absorb_bytes(&st,"selector-rbit-arp-phi-v1",sizeof("selector-rbit-arp-phi-v1"));
+  if(LNP22_DIRECT_CHAIN)
+    absorb_bytes(&st,ctx->prechallenge_seed,16);
   absorb_u64(&st,LOGQ);
   absorb_u64(&st,ctx->Lchain);
   absorb_u64(&st,GADGET_BASE);
@@ -689,6 +766,20 @@ static void derive_rbit_const_seed(selector_lnp22_ctx *ctx) {
 
 static void sample_rbit_const_phi(polx *phi, const selector_lnp22_ctx *ctx,
                                   size_t row, size_t bit_idx) {
+  if(row >= RBIT_CONST_ROWS) {
+    uint8_t buf[AES128CTR_BLOCKBYTES] __attribute__((aligned(64)));
+    poly tmp;
+    aes128ctr_ctx aes;
+    aes128ctr_init(&aes,ctx->rbit_const_seed,
+                  0x4152500000000000ULL+row*ctx->rhat_bits_len+bit_idx);
+    aes128ctr_squeezeblocks(buf,1,&aes);
+    for(size_t j=0;j<N;j++) {
+      const unsigned v=(buf[j/4]>>(2*(j%4)))&3;
+      tmp.vec->c[j]=(int16_t)((int)(v&1)-(int)((v>>1)&1));
+    }
+    polxvec_frompolyvec(phi,&tmp,1);
+    return;
+  }
   sample_zero_const_polx(phi,ctx->rbit_const_seed,
                          NONCE_RBIT_CONST_PHI_BASE +
                          (uint64_t)row * (uint64_t)ctx->rhat_bits_len +
@@ -697,6 +788,10 @@ static void sample_rbit_const_phi(polx *phi, const selector_lnp22_ctx *ctx,
 
 static void sample_x_const_phi(polx *phi, const selector_lnp22_ctx *ctx,
                                size_t row, size_t x_idx) {
+  if(row >= RBIT_CONST_ROWS) {
+    polxvec_setzero(phi,1);
+    return;
+  }
   sample_zero_const_polx(phi,ctx->rbit_const_seed,
                          NONCE_X_CONST_PHI_BASE +
                          (uint64_t)row * (uint64_t)ctx->x_len +
@@ -713,6 +808,8 @@ static void derive_linear_fold_seed(uint8_t out[16], const selector_lnp22_ctx *c
 
   shake128_inc_init(&st);
   absorb_bytes(&st,"selector-linear-fold",20);
+  if(LNP22_DIRECT_CHAIN)
+    absorb_bytes(&st,ctx->prechallenge_seed,16);
   absorb_bytes(&st,ctx->selector_chal_seed,sizeof(ctx->selector_chal_seed));
   absorb_rbit_const_transcript(&st,ctx);
   shake128_inc_finalize(&st);
@@ -884,8 +981,12 @@ static void selector_ctx_init(selector_lnp22_ctx *ctx, const uint8_t seed_in[16]
   const size_t gdigits = m*gadget_len_base3();
   const size_t Lchain = DEMO_L;
   const size_t rhat_len = UMC_ELL + m;
-  const size_t rhat_bits_len = LNP22_USE_RBIT_BINARY ? rhat_len*N : 0;
-  const size_t rhat_pack_rels = LNP22_USE_RBIT_BINARY ? rhat_len : 0;
+  /* Every opening coefficient is a scalar bit, packed into its source ring. */
+  const size_t opening_dim = LEOPARD_PROOF_FREE ? 0 : (UMC_K + UMC_N + rhat_len)*N;
+  const size_t range_rows = LEOPARD_PROOF_FREE ? 0 : UMC_K + UMC_N + rhat_len;
+  const size_t rhat_bits_len = LNP22_USE_RBIT_BINARY ?
+      rhat_len*N + opening_dim : 0;
+  const size_t rhat_pack_rels = LNP22_USE_RBIT_BINARY ? rhat_len + range_rows : 0;
   const size_t rbit_const_lambda = LNP22_ENABLE_RBIT_CONSTCHECK ? LNP22_RBIT_CONSTCHECK_LAMBDA : 0;
   const size_t umc_n = UMC_N;
   const size_t umc_k = UMC_K;
@@ -982,6 +1083,8 @@ static void selector_ctx_init(selector_lnp22_ctx *ctx, const uint8_t seed_in[16]
   ctx->alphavec = alloc_polxvec(Lchain-1);
   ctx->directfold = LNP22_DIRECT_CHAIN ? alloc_polxvec(Lchain-1) : NULL;
   ctx->xbit_weight = LNP22_DIRECT_CHAIN ? alloc_polxvec(x_len) : NULL;
+  ctx->rbit_weight = (LNP22_DIRECT_CHAIN && LNP22_USE_RBIT_BINARY) ?
+                     alloc_polxvec(rhat_bits_len) : NULL;
   ctx->directD = LNP22_DIRECT_CHAIN ? alloc_polxvec((Lchain-1)*gdigits) : NULL;
   ctx->direct_lin_B = LNP22_DIRECT_CHAIN ? alloc_polxvec(b_len) : NULL;
   ctx->g0 = alloc_polxvec(gdigits);
@@ -1039,6 +1142,7 @@ static void selector_ctx_clear(selector_lnp22_ctx *ctx) {
   free(ctx->alphavec);
   free(ctx->directfold);
   free(ctx->xbit_weight);
+  free(ctx->rbit_weight);
   free(ctx->directD);
   free(ctx->direct_lin_B);
   free(ctx->g0);
@@ -1094,6 +1198,56 @@ static void sync_witness_block_to_s1(selector_lnp22_ctx *ctx, size_t block) {
   polxvec_frompolyvec(&ctx->s1[ctx->off[block]],ctx->witness[block],ctx->n[block]);
 }
 
+static const size_t umc_range_blocks[] = {
+  LNP22_UMC_R_BLOCK, LNP22_UMC_EUA_BLOCK, LNP22_UMC_EUB_BLOCK
+};
+
+static size_t umc_opening_dim(const selector_lnp22_ctx *ctx) {
+  return (ctx->umc_r_len+ctx->umc_eua_len+ctx->umc_eub_len)*N;
+}
+
+/* All lifted scalars, including the opening, use omega_i*a_i*(a_i-1). */
+static void umc_quad_linear(polx *out, const selector_lnp22_ctx *ctx, size_t i) {
+  polx_neg(out,&ctx->rbit_weight[i]);
+}
+
+static size_t umc_range_rows(const selector_lnp22_ctx *ctx) {
+  return ctx->umc_r_len + ctx->umc_eua_len + ctx->umc_eub_len;
+}
+
+static void umc_range_row(const selector_lnp22_ctx *ctx, size_t row,
+                          size_t *source, size_t *bitoff, size_t *digits,
+                          int64_t *bias) {
+  *bitoff = ctx->rhat_len*N;
+  for(size_t g=0;g<sizeof(umc_range_blocks)/sizeof(*umc_range_blocks);g++) {
+    const size_t block = umc_range_blocks[g];
+    if(row < ctx->n[block]) {
+      *source = ctx->off[block] + row;
+      *bitoff += row*N;
+      *digits = 1;
+      *bias = 0;
+      return;
+    }
+    row -= ctx->n[block];
+    *bitoff += ctx->n[block]*N;
+  }
+  abort();
+}
+
+static void umc_range_lhs(polx *out, const selector_lnp22_ctx *ctx,
+                          const polx *vec, size_t row) {
+  size_t source, bitoff, digits;
+  int64_t bias;
+  polx term[1];
+  umc_range_row(ctx,row,&source,&bitoff,&digits,&bias);
+  polxvec_copy(out,&vec[source],1);
+  for(size_t h=0;h<N;h++) for(size_t b=0;b<digits;b++) {
+    polx_monomial(term,1LL<<b,(int)h);
+    polx_mul(term,term,&vec[ctx->off[LNP22_RHAT_BITS_BLOCK]+bitoff+h*digits+b]);
+    polx_sub(out,out,term);
+  }
+}
+
 static void populate_rhat_bits(selector_lnp22_ctx *ctx) {
   size_t row, j;
 
@@ -1102,10 +1256,25 @@ static void populate_rhat_bits(selector_lnp22_ctx *ctx) {
 
   for(row=0;row<ctx->rhat_len;row++) {
     const poly *src = &ctx->witness[LNP22_RHAT_BLOCK][row];
-    for(j=0;j<N;j++)
+    for(j=0;j<N;j++) {
+      if(src->vec->c[j] != 0 && src->vec->c[j] != 1) abort();
       poly_set_const(&ctx->witness[LNP22_RHAT_BITS_BLOCK][row*N + j],
-                     src->vec->c[j] & 1);
+                     src->vec->c[j]);
+    }
   }
+  size_t bitoff = ctx->rhat_len*N;
+  for(size_t g=0;g<sizeof(umc_range_blocks)/sizeof(*umc_range_blocks);g++) {
+    const size_t block = umc_range_blocks[g];
+    for(row=0;row<ctx->n[block];row++) for(j=0;j<N;j++) {
+      const int v = ctx->witness[block][row].vec->c[j];
+      if(v != 0 && v != 1) {
+        fprintf(stderr,"UMC opening coefficient is not binary\n");
+        abort();
+      }
+      poly_set_const(&ctx->witness[LNP22_RHAT_BITS_BLOCK][bitoff++],v);
+    }
+  }
+  if(bitoff != ctx->rhat_bits_len) abort();
   sync_witness_block_to_s1(ctx,LNP22_RHAT_BITS_BLOCK);
 }
 
@@ -1237,11 +1406,11 @@ static void precompute_umc_commitments(selector_lnp22_ctx *ctx) {
     for(row=0;row<ctx->rhat_len;row++)
       sample_binary_poly(&ctx->pre_rhat[j*ctx->rhat_len + row],ctx->lnp_seed,preproc_nonce(NONCE_RHAT_BASE,j,row));
     for(row=0;row<ctx->umc_eua_len;row++)
-      sample_cbd1_poly(&ctx->pre_eua[j*ctx->umc_eua_len + row],ctx->lnp_seed,preproc_nonce(NONCE_UMC_EUA_BASE,j,row));
+      (LEOPARD_PROOF_FREE ? sample_cbd1_poly : sample_binary_poly)(&ctx->pre_eua[j*ctx->umc_eua_len + row],ctx->lnp_seed,preproc_nonce(NONCE_UMC_EUA_BASE,j,row));
     for(row=0;row<ctx->umc_eub_len;row++)
-      sample_cbd1_poly(&ctx->pre_eub[j*ctx->umc_eub_len + row],ctx->lnp_seed,preproc_nonce(NONCE_UMC_EUB_BASE,j,row));
+      (LEOPARD_PROOF_FREE ? sample_cbd1_poly : sample_binary_poly)(&ctx->pre_eub[j*ctx->umc_eub_len + row],ctx->lnp_seed,preproc_nonce(NONCE_UMC_EUB_BASE,j,row));
     for(row=0;row<ctx->umc_r_len;row++)
-      sample_cbd1_poly(&ctx->pre_r[j*ctx->umc_r_len + row],ctx->lnp_seed,preproc_nonce(NONCE_UMC_R_BASE,j,row));
+      (LEOPARD_PROOF_FREE ? sample_cbd1_poly : sample_binary_poly)(&ctx->pre_r[j*ctx->umc_r_len + row],ctx->lnp_seed,preproc_nonce(NONCE_UMC_R_BASE,j,row));
 
     polyvec_copy(ctx->witness[LNP22_RHAT_BLOCK],&ctx->pre_rhat[j*ctx->rhat_len],ctx->rhat_len);
     polyvec_copy(ctx->witness[LNP22_UMC_EUA_BLOCK],&ctx->pre_eua[j*ctx->umc_eua_len],ctx->umc_eua_len);
@@ -1309,18 +1478,29 @@ static void compute_Cout(selector_lnp22_ctx *ctx) {
   }
 }
 
+static int reject_standard_polxvec(const int64_t *, const int64_t *, size_t,
+                                   double, double, const uint8_t[16], uint64_t);
+
 static int prepare_rbit_constcheck(selector_lnp22_ctx *ctx, const polx *s2) {
-  size_t row, i;
-  polx phi[1], term[1], native_value[1];
+  size_t row;
+  polx native_value[1];
+  int64_t yarp[RBIT_ARP_ROWS*N], zarp[RBIT_ARP_ROWS*N], shift[RBIT_ARP_ROWS*N];
 
   if(ctx->rbit_const_lambda == 0)
     return 0;
 
   polxvec_almostuniform(ctx->rbit_const_Bg,ctx->rbit_const_lambda * ctx->m2,
                         ctx->selector_chal_seed,NONCE_RBIT_CONST_BG_BASE);
+  if(RBIT_ARP_SIGMA < 10*sqrt(RBIT_ARP_ROWS*N)*ctx->rhat_bits_len)
+    return 1;
+  for(size_t attempt=0;attempt<10000;attempt++) {
+  sample_gaussian_polxvec(&ctx->rbit_const_g[RBIT_CONST_ROWS],yarp,
+                          RBIT_ARP_ROWS,RBIT_ARP_LOGSIGMA,ctx->lnp_seed,
+                          0x4152504d00000000ULL+attempt);
   for(row=0;row<ctx->rbit_const_lambda;row++) {
-    sample_zero_const_polx(&ctx->rbit_const_g[row],ctx->lnp_seed,
-                           NONCE_RBIT_CONST_G_BASE + row);
+    if(row<RBIT_CONST_ROWS)
+      sample_zero_const_polx(&ctx->rbit_const_g[row],ctx->lnp_seed,
+                             NONCE_RBIT_CONST_G_BASE + row);
     polxvec_sprod(&ctx->rbit_const_tg[row],
                   &ctx->rbit_const_Bg[row*ctx->m2],s2,ctx->m2);
     polx_add(&ctx->rbit_const_tg[row],
@@ -1331,17 +1511,21 @@ static int prepare_rbit_constcheck(selector_lnp22_ctx *ctx, const polx *s2) {
   if(LNP22_USE_NATIVE_FOLD_BINARY)
     rhat_native_binary_value(native_value,ctx,
                              &ctx->s1[ctx->off[LNP22_RHAT_BLOCK]]);
+#if defined(_OPENMP) && LNP22_PREP_ROW_PARALLEL
+#pragma omp parallel for schedule(static)
+#endif
   for(row=0;row<ctx->rbit_const_lambda;row++) {
+    polx phi[1], term[1];
     polxvec_copy(&ctx->rbit_const_h[row],&ctx->rbit_const_g[row],1);
     if(LNP22_USE_RBIT_BINARY) {
-      for(i=0;i<ctx->rhat_bits_len;i++) {
+      for(size_t i=0;i<ctx->rhat_bits_len;i++) {
         sample_rbit_const_phi(phi,ctx,row,i);
         polx_mul(term,phi,&ctx->s1[ctx->off[LNP22_RHAT_BITS_BLOCK] + i]);
         polx_add(&ctx->rbit_const_h[row],&ctx->rbit_const_h[row],term);
       }
     }
     if(LNP22_PROVE_X_BITS) {
-      for(i=0;i<ctx->x_len;i++) {
+      for(size_t i=0;i<ctx->x_len;i++) {
         sample_x_const_phi(phi,ctx,row,i);
         polx_mul(term,phi,&ctx->s1[ctx->off[LNP22_X_BLOCK] + i]);
         polx_add(&ctx->rbit_const_h[row],&ctx->rbit_const_h[row],term);
@@ -1355,7 +1539,16 @@ static int prepare_rbit_constcheck(selector_lnp22_ctx *ctx, const polx *s2) {
       polx_add(&ctx->rbit_const_h[row],&ctx->rbit_const_h[row],term);
     }
   }
-  return validate_rbit_const_transcript(ctx);
+  polxvec_centered_to_i64(zarp,&ctx->rbit_const_h[RBIT_CONST_ROWS],RBIT_ARP_ROWS);
+  for(size_t i=0;i<RBIT_ARP_ROWS*N;i++) shift[i]=zarp[i]-yarp[i];
+  if(validate_rbit_const_transcript(ctx) ||
+     reject_standard_polxvec(zarp,shift,RBIT_ARP_ROWS*N,RBIT_ARP_SIGMA,10,
+                             ctx->lnp_seed,0x4152505200000000ULL+attempt))
+    continue;
+  printf("  ARP mask rounds   = %zu\n",attempt+1);
+  return 0;
+  }
+  return 1;
 }
 
 static void compute_linear_constants(selector_lnp22_ctx *ctx) {
@@ -1371,6 +1564,13 @@ static void compute_linear_constants(selector_lnp22_ctx *ctx) {
   if(LNP22_USE_RBIT_BINARY) {
     for(row=0;row<ctx->rhat_len;row++) {
       polxvec_setzero(&ctx->ulin[idx++],1);
+    }
+    for(row=0;row<umc_range_rows(ctx);row++) {
+      size_t source, bitoff, digits;
+      int64_t bias, coeffs[N];
+      umc_range_row(ctx,row,&source,&bitoff,&digits,&bias);
+      for(size_t h=0;h<N;h++) coeffs[h] = digits ? -bias : (h==0 ? 1 : 0);
+      polxvec_fromint64vec(&ctx->ulin[idx++],1,1,coeffs);
     }
   }
   for(row=0;row<ctx->m;row++) {
@@ -1480,7 +1680,7 @@ static void compute_folded_linear_coeffs(selector_lnp22_ctx *ctx) {
   const size_t c_idx = ctx->cx_rows;
   const size_t pack_idx = c_idx;
   const size_t cout_idx = pack_idx +
-                          (LNP22_USE_RBIT_BINARY ? ctx->rhat_len : 0);
+                          (LNP22_USE_RBIT_BINARY ? ctx->rhat_len+umc_range_rows(ctx) : 0);
   const size_t top_idx = cout_idx + ctx->m;
   const size_t y_idx = top_idx + 1;
   const size_t tr_idx = y_idx + (ctx->Lchain-1);
@@ -1541,7 +1741,21 @@ static void compute_folded_linear_coeffs(selector_lnp22_ctx *ctx) {
     }
   }
 
-  COEFF_PROFILE_MARK("RBIT packing");
+  if(LNP22_USE_RBIT_BINARY) for(row=0;row<umc_range_rows(ctx);row++) {
+    size_t source, bitoff, digits;
+    int64_t bias;
+    umc_range_row(ctx,row,&source,&bitoff,&digits,&bias);
+    polx_add(&ctx->lincoeff[source],&ctx->lincoeff[source],&ctx->linfold[idx]);
+    for(j=0;j<N;j++) for(size_t b=0;b<digits;b++) {
+      const size_t dest = ctx->off[LNP22_RHAT_BITS_BLOCK]+bitoff+j*digits+b;
+      polx_monomial(monomial,-(1LL<<b),(int)j);
+      polx_mul(factor,&ctx->linfold[idx],monomial);
+      polx_add(&ctx->lincoeff[dest],&ctx->lincoeff[dest],factor);
+    }
+    idx++;
+  }
+
+  COEFF_PROFILE_MARK("RBIT/range packing");
 
   for(row=0;row<ctx->m;row++) {
     for(i=0;i<ctx->rhat_len;i++) {
@@ -1642,13 +1856,21 @@ static void compute_folded_linear_coeffs(selector_lnp22_ctx *ctx) {
   idx = LNP22_DIRECT_CHAIN ? top_idx + 1 : tr_idx + (ctx->Lchain-1);
   if(ctx->rbit_const_lambda != 0 && !LNP22_USE_NATIVE_FOLD_BINARY) {
     polx phi[1];
-    for(row=0;row<ctx->rbit_const_lambda;row++) {
-      for(i=0;i<ctx->rhat_bits_len;i++) {
-        sample_rbit_const_phi(phi,ctx,row,i);
-        polx_mul(factor,&ctx->linfold[idx],phi);
-        polx_add(&ctx->lincoeff[ctx->off[LNP22_RHAT_BITS_BLOCK] + i],
-                 &ctx->lincoeff[ctx->off[LNP22_RHAT_BITS_BLOCK] + i],factor);
+    /* Each scalar owns one output coefficient; fold rows locally to avoid
+     * both write conflicts and a parallel region for every row. */
+#if defined(_OPENMP) && LNP22_PREP_ROW_PARALLEL
+#pragma omp parallel for schedule(static)
+#endif
+    for(size_t bit=0;bit<ctx->rhat_bits_len;bit++) {
+      polx bit_phi[1], bit_factor[1];
+      for(size_t crow=0;crow<ctx->rbit_const_lambda;crow++) {
+        sample_rbit_const_phi(bit_phi,ctx,crow,bit);
+        polx_mul(bit_factor,&ctx->linfold[idx+crow],bit_phi);
+        polx_add(&ctx->lincoeff[ctx->off[LNP22_RHAT_BITS_BLOCK]+bit],
+                 &ctx->lincoeff[ctx->off[LNP22_RHAT_BITS_BLOCK]+bit],bit_factor);
       }
+    }
+    for(row=0;row<ctx->rbit_const_lambda;row++) {
       if(LNP22_PROVE_X_BITS) {
         for(i=0;i<ctx->x_len;i++) {
           sample_x_const_phi(phi,ctx,row,i);
@@ -1707,7 +1929,7 @@ static int prepare_linear_fold_for_proof(selector_lnp22_ctx *ctx, polx *ufold_pu
 
 static void derive_direct_chain_fold(selector_lnp22_ctx *ctx, const polx *tA) {
   shake128incctx st;
-  uint8_t seeds[32];
+  uint8_t seeds[48];
   size_t t;
 
   if(!LNP22_DIRECT_CHAIN)
@@ -1730,6 +1952,11 @@ static void derive_direct_chain_fold(selector_lnp22_ctx *ctx, const polx *tA) {
   for(t=0;t<ctx->Lchain-1;t++)
     polxvec_challenge(&ctx->rhovec[t*ctx->m],ctx->m,seeds,1 + (uint64_t)t);
   polxvec_almostuniform(ctx->xbit_weight,ctx->x_len,&seeds[16],0);
+  if(LNP22_USE_RBIT_BINARY) {
+    /* The separately checked ARP supplies the no-wrap bound for this sum. */
+    for(size_t i=0;i<ctx->rhat_bits_len;i++)
+      polx_monomial(&ctx->rbit_weight[i],1,0);
+  }
 }
 
 #ifndef LNP22_DIRECT_COEFF_BLOCK
@@ -2193,21 +2420,21 @@ static void polxvec_sum(polx *out, const polx *vec, size_t len) {
 
 static void rhat_bits_quad_value(polx *out, const selector_lnp22_ctx *ctx,
                                  const polx *bits) {
-  polx lin[1];
-
+  polx sum[1];
   polxvec_sprod(out,bits,bits,ctx->rhat_bits_len);
-  polxvec_sum(lin,bits,ctx->rhat_bits_len);
-  polx_sub(out,out,lin);
+  polxvec_sum(sum,bits,ctx->rhat_bits_len);
+  polx_sub(out,out,sum);
+  polx_refresh(out);
 }
 
 static void rhat_bits_verifier_value(polx *out, const selector_lnp22_ctx *ctx,
                                      const polx *zbits, const polx *c) {
-  polx lin[1];
-
+  polx sum[1];
   polxvec_sprod(out,zbits,zbits,ctx->rhat_bits_len);
-  polxvec_sum(lin,zbits,ctx->rhat_bits_len);
-  polx_mul(lin,c,lin);
-  polx_sub(out,out,lin);
+  polxvec_sum(sum,zbits,ctx->rhat_bits_len);
+  polx_mul(sum,sum,c);
+  polx_sub(out,out,sum);
+  polx_refresh(out);
 }
 
 static void x_bits_quad_value(polx *out, const selector_lnp22_ctx *ctx,
@@ -2268,6 +2495,8 @@ static int run_lnp22_soundness_selftest(selector_lnp22_ctx *ctx,
   polx *saved_rho = alloc_polxvec(rho_len);
   polx *changed_tA = alloc_polxvec(ctx->kmsis);
   polx *bad_x = alloc_polxvec(ctx->x_len);
+  polx *bad_rbit = LNP22_USE_RBIT_BINARY ?
+                   alloc_polxvec(ctx->rhat_bits_len) : NULL;
   polx one[1], diff[1], bit_value[1], saved_h[1];
   size_t i;
   int rho_changed = 0;
@@ -2309,10 +2538,20 @@ static int run_lnp22_soundness_selftest(selector_lnp22_ctx *ctx,
     fprintf(stderr,"ERROR: weighted bit relation accepted x[0] = 2\n");
     ok = 0;
   }
+  if(LNP22_USE_RBIT_BINARY) {
+    polxvec_setzero(bad_rbit,ctx->rhat_bits_len);
+    polx_monomial(&bad_rbit[0],2,0);
+    rhat_bits_quad_value(bit_value,ctx,bad_rbit);
+    if(polx_iszero(bit_value)) {
+      fprintf(stderr,"ERROR: weighted RBIT relation accepted RBIT[0] = 2\n");
+      ok = 0;
+    }
+  }
 
   free(saved_rho);
   free(changed_tA);
   free(bad_x);
+  free(bad_rbit);
   printf("LNP22 soundness self-test: %s\n",ok ? "PASS" : "FAIL");
   return ok ? 0 : 1;
 }
@@ -2522,6 +2761,7 @@ static void quad_mask_terms(polx *g1, polx *g0, const selector_lnp22_ctx *ctx,
     if(LNP22_USE_RBIT_BINARY) {
       polxvec_sprod(tmp0,RBITy,RBITy,ctx->rhat_bits_len);
       polx_add(g0,g0,tmp0);
+      polx_refresh(g0);
     }
     rhat_native_binary_mask_terms(g1,g0,ctx,RHATs,RHATy);
     return;
@@ -2612,6 +2852,15 @@ static int first_linear_relation_failure(const selector_lnp22_ctx *ctx, const po
         fprintf(stderr,"DEBUG: linear fail in RHAT bit packing row %zu\n",row);
         return 4;
       }
+    }
+  }
+
+  if(LNP22_USE_RBIT_BINARY) for(row=0;row<umc_range_rows(ctx);row++) {
+    umc_range_lhs(rel,ctx,vec,row);
+    polx_sub(rel,rel,&ctx->ulin[ctx->cx_rows+ctx->rhat_len+row]);
+    if(!polx_iszero(rel)) {
+      fprintf(stderr,"DEBUG: linear fail in UMC range packing row %zu\n",row);
+      return 9;
     }
   }
 
@@ -2731,6 +2980,12 @@ static void folded_linear_eval_explicit(polx *out, const selector_lnp22_ctx *ctx
       polx_mul(tmp,&ctx->linfold[idx++],rel);
       polx_add(out,out,tmp);
     }
+  }
+
+  if(LNP22_USE_RBIT_BINARY) for(row=0;row<umc_range_rows(ctx);row++) {
+    umc_range_lhs(rel,ctx,vec,row);
+    polx_mul(tmp,&ctx->linfold[idx++],rel);
+    polx_add(out,out,tmp);
   }
 
   for(row=0;row<ctx->m;row++) {
@@ -3003,21 +3258,12 @@ static int reject_standard_polxvec(const int64_t *zcoeffs, const int64_t *cscoef
   return log((long double)u) > (exponent - logM);
 }
 
-static int reject_rej2_polxvec(const int64_t *zcoeffs, const int64_t *cscoeffs, size_t count,
+static int reject_z2_polxvec(const int64_t *zcoeffs, const int64_t *cscoeffs, size_t count,
                                double sigma, double gamma,
                                const uint8_t seed[16], uint64_t nonce) {
-  const long double logM = rejection_logM_rej2(gamma);
-  const long double sigma2 = (long double)sigma * (long double)sigma;
-  const long double dot_zv = centered_dot_product_i64(zcoeffs,cscoeffs,count);
-  const long double dot_vv = centered_dot_product_i64(cscoeffs,cscoeffs,count);
-  const long double exponent = (dot_vv - 2.0L * dot_zv) / (2.0L * sigma2);
-  double u = shake_uniform01_seeded(seed,nonce);
-
-  if(dot_zv < 0.0L)
-    return 1;
-  if(u < 1e-18)
-    u = 1e-18;
-  return log((long double)u) > (exponent - logM);
+  /* Standard rejection avoids conditioning the transcript on sign(<z,cs>).
+   * At gamma=20 its envelope differs from Rej2 by less than one percent. */
+  return reject_standard_polxvec(zcoeffs,cscoeffs,count,sigma,gamma,seed,nonce);
 }
 
 static void round_ws_init(lnp22_round_ws *ws, const selector_lnp22_ctx *ctx) {
@@ -3178,6 +3424,10 @@ int main(int argc, char **argv) {
   sample_setup_sec = elapsed_sec(&t0,&t1);
 
   clock_gettime(CLOCK_MONOTONIC,&t0);
+  if(LNP22_DIRECT_CHAIN) {
+    compute_tA_rows(tA,&ctx,ctx.s1,s2);
+    bind_prechallenge_commitment(&ctx,tA);
+  }
   if(prepare_linear_fold_for_proof(&ctx,ufold_public,s2))
     ok = 0;
   compute_public_quad_rhs(uquad_public,&ctx);
@@ -3189,10 +3439,11 @@ int main(int argc, char **argv) {
 
   clock_gettime(CLOCK_MONOTONIC,&t0);
 #if LNP22_COMBINE_TA_W
-  if(LNP22_DIRECT_CHAIN || batch_rounds > 1 || batch_ws != NULL)
+  if(!LNP22_DIRECT_CHAIN && (batch_rounds > 1 || batch_ws != NULL))
     compute_tA_rows(tA,&ctx,ctx.s1,s2);
 #else
-  compute_tA_rows(tA,&ctx,ctx.s1,s2);
+  if(!LNP22_DIRECT_CHAIN)
+    compute_tA_rows(tA,&ctx,ctx.s1,s2);
 #endif
   if(LNP22_DIRECT_CHAIN) {
     polx direct_check[1];
@@ -3296,7 +3547,7 @@ int main(int argc, char **argv) {
                                        sigma_from_log2stdev(LNP22_LOG2STDEV1),
                                        LNP22_GAMMA1,
                                        ctx.lnp_seed,NONCE_Y1_BASE + 1000000 + rejection_rounds);
-        rej2 = reject_rej2_polxvec(z2coeffs,cs2coeffs,ctx.m2*N,
+        rej2 = reject_z2_polxvec(z2coeffs,cs2coeffs,ctx.m2*N,
                                    sigma_from_log2stdev(LNP22_LOG2STDEV2),
                                    LNP22_GAMMA2,
                                    ctx.lnp_seed,NONCE_Y2_BASE + 1000000 + rejection_rounds);
@@ -3366,7 +3617,7 @@ int main(int argc, char **argv) {
                                            sigma_from_log2stdev(LNP22_LOG2STDEV1),
                                            LNP22_GAMMA1,
                                            ctx.lnp_seed,NONCE_Y1_BASE + 1000000 + batch_base + bi);
-        ws->rej2 = reject_rej2_polxvec(ws->z2coeffs,ws->cs2coeffs,ctx.m2*N,
+        ws->rej2 = reject_z2_polxvec(ws->z2coeffs,ws->cs2coeffs,ctx.m2*N,
                                        sigma_from_log2stdev(LNP22_LOG2STDEV2),
                                        LNP22_GAMMA2,
                                        ctx.lnp_seed,NONCE_Y2_BASE + 1000000 + batch_base + bi);

@@ -31,11 +31,11 @@ LOGQ = 72
 M = 42
 ELL = 45
 BASE = 319
-KMSIS = 21
-M2 = 67
+KMSIS = 24
+M2 = 74
 SIGMA1 = 27
-SEED = 12
-OUTER_BASE = 57344
+SEED = 2
+OUTER_BASE = 40960
 FG_EXTRA = 3
 PROFILE_FLAGS = -include $(NIZK2)/profile_$(PROFILE).h
 else
@@ -70,7 +70,7 @@ FRONTEND = $(NIZK1)/client_inner.c $(NIZK1)/client_outer.c \
 	$(wildcard $(NIZK1)/src/core/*.h $(NIZK1)/src/selector/*)
 COMMON_DEPS = common.h wire.h $(NIZK2)/commitment.h .build-config
 
-.PHONY: all check clean FORCE
+.PHONY: all check check-client clean FORCE
 ifneq ($(filter $(PROFILE),semi_partial56 semi_plain64),)
 all: semi-honest-bench
 else
@@ -93,6 +93,18 @@ threshold-server: server.c nizk2.c nizk2.h wire.c $(NIZK2)/server_proof.c \
 semi-honest-bench: semi-honest-bench.c nizk1.c nizk1.h wire.c public_fastpath.h short_codec.h $(CORE) $(FRONTEND) $(COMMON_DEPS)
 	$(CC) $(CLIENT_FLAGS) semi-honest-bench.c wire.c $(CORE) -o $@ -lm -fopenmp
 
+nizk1-check: $(ROOT)/tests/nizk1.c nizk1.c wire.c $(CORE) $(FRONTEND) $(COMMON_DEPS)
+	$(CC) $(CLIENT_FLAGS) $(ROOT)/tests/nizk1.c wire.c $(CORE) -o $@ -lm -fopenmp
+
+arithmetic-check: $(ROOT)/tests/arithmetic.c $(CORE) $(FRONTEND) $(COMMON_DEPS)
+	$(CC) $(CLIENT_FLAGS) $(ROOT)/tests/arithmetic.c $(CORE) -o $@ -lm -fopenmp
+
+check-client: threshold-client nizk1-check arithmetic-check
+	./arithmetic-check
+	./nizk1-check
+	cd $(ROOT) && python3 tests/nizk1-wire.py --seeds 0,1,2 --patterns --output results/check-$(PROFILE)
+	cd $(ROOT) && python3 tests/cached-request.py
+
 nizk2-check: $(ROOT)/tests/nizk2.c nizk2.c nizk2.h wire.c \
 	$(NIZK2)/server_proof.c $(NIZK2)/commitment_proof.h \
 	$(NIZK2)/params_double_$(PROFILE)_agg.h $(NIZK2)/profile_$(PROFILE).h \
@@ -103,4 +115,4 @@ check: nizk2-check
 	./nizk2-check
 
 clean:
-	rm -f threshold-client threshold-server semi-honest-bench nizk2-check .build-config .build-config.tmp
+	rm -f threshold-client threshold-server semi-honest-bench nizk1-check nizk2-check arithmetic-check .build-config .build-config.tmp

@@ -603,11 +603,10 @@ size_t qugarbage_raw(polx *u, poly *g, size_t r, size_t n, const polx s[r][n],
 {
   size_t i,j,k,l;
   const size_t len = (r*r+r)/2;
-  polx buf[MAX(cpp->fg*len,cpp->kappa1)];
-  polx *gx = (tail) ? u+off : buf;
-
   if(!cpp->fg)
     return off;
+  polx *buf = tail ? NULL : _aligned_alloc(64,MAX(cpp->fg*len,cpp->kappa1)*sizeof(polx));
+  polx *gx = tail ? u+off : buf;
 
 #if defined(_OPENMP)
   int threads = omp_get_max_threads();
@@ -657,7 +656,7 @@ size_t qugarbage_raw(polx *u, poly *g, size_t r, size_t n, const polx s[r][n],
     off += polxvec_mul_extension(gx,&comkey[off],gx,cpp->fg*len,cpp->kappa1,1);
     polxvec_add(u,u,gx,cpp->kappa1);
   }
-
+  free(buf);
   return off;
 }
 
@@ -848,10 +847,10 @@ static void polxvec_polx_mul_add_parallel(polx *r, const polx *a, const polx *b,
 }
 
 static int project_parallel(const statement *ost, proof *pi,
-                            uint8_t jlmat[][ost->n][256*N/8],
+                            uint8_t jlmat[][ost->n][JL_BYTES],
                             const witness *iwt, const uint8_t key[16]) {
 #if defined(_OPENMP) && LABRADOR_PROJECT_PARALLEL
-  const size_t bytes = 256*N/8;
+  const size_t bytes = JL_BYTES;
   const size_t r = iwt->r;
   size_t prefix[r+1], padding[r];
   uint8_t *out[r], *zeros[r];
@@ -918,12 +917,13 @@ static int project_parallel(const statement *ost, proof *pi,
 #endif
 }
 
-int project(statement *ost, proof *pi, uint8_t jlmat[][ost->n][256*N/8], const witness *iwt) {
+int project(statement *ost, proof *pi, uint8_t jlmat[][ost->n][JL_BYTES], const witness *iwt) {
   const size_t r = iwt->r;
   const size_t *n = iwt->n;
 
   size_t i,j,k,rep;
   uint64_t normsq = 0, test;
+  unsigned __int128 projected_budget;
   __attribute__((aligned(16)))
   uint8_t hashbuf[16+1024];
   aes128ctr_ctx aesctx;
@@ -935,7 +935,7 @@ int project(statement *ost, proof *pi, uint8_t jlmat[][ost->n][256*N/8], const w
     return 1;
   }
   test = next2power(4*sqrt(normsq));
-  normsq *= 256;
+  projected_budget = (unsigned __int128)normsq*256;
   shake128(hashbuf,32,ost->h,16);
   aes128ctr_init(&aesctx,&hashbuf[16],0);
   pi->jlnonce = 0;
@@ -945,11 +945,11 @@ int project(statement *ost, proof *pi, uint8_t jlmat[][ost->n][256*N/8], const w
     if(!project_parallel(ost,pi,jlmat,iwt,&hashbuf[16])) {
       j = k = 0;
       for(i=0;i<r;i++) {
-        aes128ctr_squeezeblocks(jlmat[j][k],n[i]*256*N/8/AES128CTR_BLOCKBYTES,&aesctx);
+        aes128ctr_squeezeblocks(jlmat[j][k],n[i]*JL_BYTES/AES128CTR_BLOCKBYTES,&aesctx);
         polyvec_jlproj_add(pi->p,iwt->s[i],n[i],jlmat[j][k]);
         k += n[i];
         if(pi->nu[i]) {
-          memset(jlmat[j][k],0,(pi->nu[i]*ost->n-k)*256*N/8);
+          memset(jlmat[j][k],0,(pi->nu[i]*ost->n-k)*JL_BYTES);
           j += pi->nu[i];
           k = 0;
         }
@@ -959,20 +959,20 @@ int project(statement *ost, proof *pi, uint8_t jlmat[][ost->n][256*N/8], const w
     for(i=0;i<256;i++)  // TODO: vectorize
       if((uint64_t)labs(pi->p[i]) >= test)
         rep = 1;
-  } while(rep || jlproj_normsq(pi->p) > normsq);
+  } while(rep || jlproj_normsq_wide(pi->p) > projected_budget);
 
   memcpy(&hashbuf[16],pi->p,1024);
   shake128(ost->h,16,hashbuf,16+1024);
   return 0;
 }
 
-int reduce_project(statement *ost, uint8_t jlmat[][ost->n][256*N/8], const proof *pi, size_t r, uint64_t betasq) {
+int reduce_project(statement *ost, uint8_t jlmat[][ost->n][JL_BYTES], const proof *pi, size_t r, uint64_t betasq) {
   size_t i,j,k;
   __attribute__((aligned(16)))
   uint8_t hashbuf[16+1024];
   uint8_t jlkey[16];
 
-  if(jlproj_normsq(pi->p) > 256*MIN(JLMAXNORMSQ,betasq)) {
+  if(jlproj_normsq_wide(pi->p) > (unsigned __int128)256*MIN(JLMAXNORMSQ,betasq)) {
     fprintf(stderr,"ERROR in reduce_project(): Witness projection longer than bound\n");
     return 1;
   }
@@ -988,24 +988,23 @@ int reduce_project(statement *ost, uint8_t jlmat[][ost->n][256*N/8], const proof
     uint8_t *zeroptr[r];
     size_t blocks[r];
     size_t zerobytes[r];
-    uint64_t counter[r];
-    uint64_t blockoff = 0;
+    size_t prefix[r+1];
     size_t total_blocks = 0;
 
+    prefix[0] = 0;
     j = k = 0;
     for(i=0;i<r;i++) {
       outptr[i] = jlmat[j][k];
-      blocks[i] = pi->n[i]*256*N/8/AES128CTR_BLOCKBYTES;
-      counter[i] = 32*blockoff;
-      blockoff += blocks[i];
+      blocks[i] = pi->n[i]*JL_BYTES/AES128CTR_BLOCKBYTES;
       total_blocks += blocks[i];
+      prefix[i+1] = total_blocks;
       zeroptr[i] = NULL;
       zerobytes[i] = 0;
 
       k += pi->n[i];
       if(pi->nu[i]) {
         zeroptr[i] = jlmat[j][k];
-        zerobytes[i] = (pi->nu[i]*ost->n-k)*256*N/8;
+        zerobytes[i] = (pi->nu[i]*ost->n-k)*JL_BYTES;
         j += pi->nu[i];
         k = 0;
       }
@@ -1017,13 +1016,19 @@ int reduce_project(statement *ost, uint8_t jlmat[][ost->n][256*N/8], const proof
       threads = LABRADOR_VERIFY_MAX_THREADS;
     if(total_blocks >= 4096 && threads > 1) {
 #pragma omp parallel for schedule(static) num_threads(threads)
-      for(long long ii=0;ii<(long long)r;ii++) {
+      for(int task=0;task<threads;task++) {
+        const size_t start=total_blocks*(size_t)task/(size_t)threads;
+        const size_t end=total_blocks*(size_t)(task+1)/(size_t)threads;
         aes128ctr_ctx aesctx;
         aes128ctr_init(&aesctx,jlkey,pi->jlnonce);
-        _mm_store_si128(&aesctx.n,_mm_set_epi64x((long long)counter[ii],(long long)pi->jlnonce));
-        aes128ctr_squeezeblocks(outptr[ii],blocks[ii],&aesctx);
-        if(zerobytes[ii])
-          memset(zeroptr[ii],0,zerobytes[ii]);
+        _mm_store_si128(&aesctx.n,_mm_set_epi64x((long long)(32*start),(long long)pi->jlnonce));
+        for(size_t ii=0;ii<r;ii++) {
+          const size_t lo=MAX(start,prefix[ii]), hi=MIN(end,prefix[ii+1]);
+          if(lo<hi)
+            aes128ctr_squeezeblocks(outptr[ii]+(lo-prefix[ii])*AES128CTR_BLOCKBYTES,hi-lo,&aesctx);
+        }
+        for(size_t ii=(size_t)task;ii<r;ii+=(size_t)threads)
+          if(zerobytes[ii]) memset(zeroptr[ii],0,zerobytes[ii]);
       }
     } else
 #endif
@@ -1042,7 +1047,7 @@ int reduce_project(statement *ost, uint8_t jlmat[][ost->n][256*N/8], const proof
 }
 
 void collaps_jlproj_raw(constraint *cnst, size_t r, size_t n, uint8_t h[16], const int32_t p[256],
-                       const uint8_t jlmat[r][n][256*N/8])
+                       const uint8_t jlmat[r][n][JL_BYTES])
 {
   __attribute__((aligned(32)))
   uint8_t hashbuf[32+QBYTES*256+24];  // additional 24 bytes because of vector loads
@@ -1065,8 +1070,36 @@ void collaps_jlproj_raw(constraint *cnst, size_t r, size_t n, uint8_t h[16], con
 #endif
 }
 
-void collaps_jlproj(constraint *cnst, statement *st, const proof *pi, const uint8_t jlmat[st->r][st->n][256*N/8]) {
+void collaps_jlproj(constraint *cnst, statement *st, const proof *pi, const uint8_t jlmat[st->r][st->n][JL_BYTES]) {
+#if LOGQ > 64 && !defined(JLPROJ_COLLAPSE_PADDING_REFERENCE)
+  _Alignas(32) uint8_t hashbuf[32+QBYTES*256+24];
+  _Alignas(64) uint8_t zero_column[JL_BYTES]={0};
+  polx padding;
+  size_t offset=0, used=0;
+  shake128(hashbuf,sizeof(hashbuf),st->h,16);
+  memcpy(st->h,hashbuf,16);
+  /* A zero-byte Bin1 column is NOT the zero polynomial: its two sign planes
+   * encode -1. Compute that common column once, preserving the original
+   * padded relation exactly, rather than omitting its coefficients. */
+  polxvec_jlproj_collapsmat(&padding,zero_column,1,&hashbuf[32]);
+  for(size_t i=0;i<pi->r;i++) {
+    polxvec_jlproj_collapsmat(cnst->phi+offset,(const uint8_t *)jlmat+offset*JL_BYTES,
+                             pi->n[i],&hashbuf[32]);
+    offset+=pi->n[i];
+    used+=pi->n[i];
+    if(pi->nu[i]) {
+      const size_t pad=pi->nu[i]*st->n-used;
+      for(size_t j=0;j<pad;j++) cnst->phi[offset+j]=padding;
+      offset+=pad;
+      used=0;
+    }
+  }
+  polz z={0};
+  polz_setcoeff_fromint128(&z,jlproj_collapsproj(pi->p,&hashbuf[32]),0);
+  polz_topolx(cnst->b,&z);
+#else
   collaps_jlproj_raw(cnst,st->r,st->n,st->h,pi->p,jlmat);
+#endif
 }
 
 void lift_aggregate_zqcnst(statement *ost, proof *pi, size_t i, constraint *cnst, const polx sx[ost->r][ost->n]) {
@@ -1103,6 +1136,15 @@ void lift_aggregate_zqcnst(statement *ost, proof *pi, size_t i, constraint *cnst
   clock_gettime(CLOCK_MONOTONIC,&t0);
 #endif
   polz_frompolx(bfull,cnst->b);
+#if LABRADOR_RELATION_DEBUG
+  {
+    polz difference;
+    polz_sub(&difference,bfull,bold);
+    polz_center(&difference);
+    fprintf(stderr,"DEBUG lifted constant equality[%zu]: %s\n",i,
+            polz_iszero_constcoeff(&difference) ? "ok" : "FAILED");
+  }
+#endif
   polzvec_copy(&pi->bb[i],bfull,1);
   polz_setcoeff_fromint64(&pi->bb[i],0,0);
   polz_setcoeff(bfull,c0,0);
@@ -1576,9 +1618,9 @@ int prove(statement *ost, witness *owt, proof *pi, const statement *ist, const w
   printf("Predicted witness norm: %.2f\n\n",sqrt(pi->normsq));
 
   {
-    buf = _aligned_alloc(64,ost->r*ost->n*(sizeof(polx)+256*N/8));
+    buf = _aligned_alloc(64,ost->r*ost->n*(sizeof(polx)+JL_BYTES));
     polx (*sx)[ost->n] = (polx(*)[ost->n])buf;
-    uint8_t (*jlmat)[ost->n][256*N/8] = (uint8_t(*)[ost->n][256*N/8])sx[ost->r];
+    uint8_t (*jlmat)[ost->n][JL_BYTES] = (uint8_t(*)[ost->n][JL_BYTES])sx[ost->r];
     commit(ost,owt,pi,sx,iwt);
     ret = project(ost,pi,jlmat,iwt);
     if(ret) {
@@ -1616,12 +1658,12 @@ err:
 int reduce(statement *ost, const proof *pi, const statement *ist) {
   size_t i;
   int ret;
-  uint8_t (*jlmat)[ost->n][256*N/8];
+  uint8_t (*jlmat)[ost->n][JL_BYTES];
   constraint cnst[1];
 
   init_statement(ost,pi,ist->h);
   init_constraint(cnst,ost);
-  jlmat = _aligned_alloc(64,ost->r*ost->n*256*N/8);
+  jlmat = _aligned_alloc(64,ost->r*ost->n*JL_BYTES);
 
   reduce_commit(ost,pi);
   ret = reduce_project(ost,jlmat,pi,pi->r,ist->betasq);
@@ -1714,11 +1756,14 @@ int verify(const statement *st, const witness *wt) {
     /* reconstruct inner coms and garbage */
     for(i=0;i<r;i++)
       for(j=1;j<cpp->fu;j++)
-        polxvec_scale_add(&v[t+i*l],&v[t+i*l+j*cpp->kappa],cpp->kappa,(int64_t)1 << j*cpp->bu);
+        polxvec_scale_add(&v[t+i*l],&v[t+i*l+j*cpp->kappa],cpp->kappa,
+                         scalar_modq((__int128)1 << (j*cpp->bu)));
     for(i=1;i<cpp->fg;i++)
-      polxvec_scale_add(&v[g],&v[g+i*(r*r+r)/2],(r*r+r)/2,(int64_t)1 << i*cpp->bg);
+      polxvec_scale_add(&v[g],&v[g+i*(r*r+r)/2],(r*r+r)/2,
+                       scalar_modq((__int128)1 << (i*cpp->bg)));
     for(i=1;i<cpp->fu;i++)
-      polxvec_scale_add(&v[h],&v[h+i*(r*r+r)/2],(r*r+r)/2,(int64_t)1 << i*cpp->bu);
+      polxvec_scale_add(&v[h],&v[h+i*(r*r+r)/2],(r*r+r)/2,
+                       scalar_modq((__int128)1 << (i*cpp->bu)));
   }
   else {
     polxvec_copy(&v[t],st->u1,cpp->u1len);

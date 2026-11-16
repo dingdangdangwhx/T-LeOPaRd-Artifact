@@ -460,9 +460,9 @@ int simple_prove(statement *ost, witness *owt, proof *pi, commitment *com,
 
   {
     const size_t s1 = pi->nu[ist->r];
-    buf = _aligned_alloc(64,ost->r*ost->n*sizeof(polx)+s1*ost->n*256*N/8);
+    buf = _aligned_alloc(64,ost->r*ost->n*sizeof(polx)+s1*ost->n*JL_BYTES);
     polx (*sx)[ost->n] = (polx(*)[ost->n])buf;
-    uint8_t (*jlmat)[ost->n][256*N/8] = (uint8_t(*)[ost->n][256*N/8])sx[ost->r];
+    uint8_t (*jlmat)[ost->n][JL_BYTES] = (uint8_t(*)[ost->n][JL_BYTES])sx[ost->r];
     simple_commit(ost,owt,pi,com,sx,ist,ewt);
     ret = project(ost,pi,jlmat,ewt);
     if(ret) {
@@ -512,7 +512,7 @@ int simple_reduce(statement *ost, const proof *pi, const commitment *com, const 
   size_t i;
   int ret;
   uint64_t betasq = 0;
-  uint8_t (*jlmat)[ost->n][256*N/8];
+  uint8_t (*jlmat)[ost->n][JL_BYTES];
   constraint cnst[1] = {};
 
   init_statement(ost,pi,ist->h);
@@ -523,7 +523,7 @@ int simple_reduce(statement *ost, const proof *pi, const commitment *com, const 
   }
 
   const size_t s1 = pi->nu[ist->r];
-  jlmat = _aligned_alloc(64,s1*ost->n*256*N/8);
+  jlmat = _aligned_alloc(64,s1*ost->n*JL_BYTES);
 
   reduce_simple_commit(ost,pi,com);
   ret = reduce_project(ost,jlmat,pi,ist->r+1,betasq);

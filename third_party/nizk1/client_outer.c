@@ -41,6 +41,19 @@
 #endif
 #include "client_inner.c"
 
+#ifndef OUTER_RBIT_PRODUCT_DIGITS
+#define OUTER_RBIT_PRODUCT_DIGITS 0
+#endif
+#if OUTER_RBIT_PRODUCT_DIGITS != 0 && (OUTER_RBIT_PRODUCT_DIGITS < 3 || OUTER_RBIT_PRODUCT_DIGITS > 5)
+#error "OUTER_RBIT_PRODUCT_DIGITS must be between 3 and 5"
+#endif
+#ifndef OUTER_RBIT_PRODUCT_BASE
+#define OUTER_RBIT_PRODUCT_BASE 32768
+#endif
+#ifndef OUTER_RBIT_PRODUCT_CHECK_ROUNDS
+#define OUTER_RBIT_PRODUCT_CHECK_ROUNDS 1
+#endif
+
 enum {
   OUT_B0 = 0,
   OUT_B1,
@@ -60,6 +73,17 @@ enum {
 #else
   OUT_RBIT0,
   OUT_RBIT1,
+#if OUTER_RBIT_PRODUCT_DIGITS > 0
+  OUT_PBIT0,
+  OUT_PBIT1,
+  OUT_PBIT2,
+#endif
+#if OUTER_RBIT_PRODUCT_DIGITS >= 4
+  OUT_PBIT3,
+#endif
+#if OUTER_RBIT_PRODUCT_DIGITS == 5
+  OUT_PBIT4,
+#endif
 #endif
   OUT_Z20,
   OUT_Z21,
@@ -90,7 +114,9 @@ enum {
 
 #ifndef OUTER_BZ_DECOMP_BASE
 #if OUTER_BZ_DIGITS == 2
-#if LOGQ >= 64
+#if LOGQ == 72
+#define OUTER_BZ_DECOMP_BASE 40960
+#elif LOGQ >= 64
 #define OUTER_BZ_DECOMP_BASE 49152
 #elif LOGQ >= 56
 #define OUTER_BZ_DECOMP_BASE 32768
@@ -103,7 +129,9 @@ enum {
 #endif
 
 #ifndef OUTER_XY_DECOMP_BASE
-#if LOGQ >= 64
+#if LOGQ == 72
+#define OUTER_XY_DECOMP_BASE 40960
+#elif LOGQ >= 64
 #define OUTER_XY_DECOMP_BASE 49152
 #elif LOGQ >= 56
 #define OUTER_XY_DECOMP_BASE 32768
@@ -131,6 +159,42 @@ enum {
 #define OUTER_DIRECT_P_BASE 8192
 #endif
 #endif
+
+/* Public admission bounds, not a substitute for the composed MSIS estimate.
+ * For z = z0 + base*z1, use |z0| <= base/2 and ||z||^2 <= 2*n*sigma^2. */
+static uint64_t outer_pair_budget(size_t coeffs, uint64_t base, int logsigma) {
+  const unsigned __int128 denom = (unsigned __int128)base*base;
+  const unsigned __int128 high = ((unsigned __int128)16*coeffs << (2*logsigma));
+  return (uint64_t)((unsigned __int128)coeffs*denom/4 +
+                    (high+denom-1)/denom + coeffs);
+}
+
+static uint64_t outer_admissible_betasq(const selector_lnp22_ctx *ctx) {
+  const size_t tail = ctx->rhat_len + ctx->umc_eua_len + ctx->umc_eub_len +
+                      ctx->umc_r_len + ctx->umc_va_len + ctx->umc_vb_len;
+  uint64_t bound = outer_pair_budget(ctx->b_len*N,OUTER_BZ_DECOMP_BASE,LNP22_LOG2STDEV1);
+  bound += outer_pair_budget((ctx->x_len+tail+ctx->rhat_bits_len)*N,
+                             OUTER_XY_DECOMP_BASE,LNP22_LOG2STDEV1);
+  bound += outer_pair_budget(ctx->m2*N,OUTER_Z2_DECOMP_BASE,LNP22_LOG2STDEV2);
+  const unsigned __int128 q = ((unsigned __int128)1<<LOGQ)-QOFF;
+  unsigned __int128 power = 1;
+  for(size_t i=1;i<OUTER_DIRECT_P_DIGITS;i++) power *= OUTER_DIRECT_P_BASE;
+  const uint64_t top = (uint64_t)((q/2)/power)+2;
+  bound += ctx->x_len*N*((uint64_t)(OUTER_DIRECT_P_DIGITS-1)*
+                         OUTER_DIRECT_P_BASE*OUTER_DIRECT_P_BASE/4 + top*top);
+#if LNP22_DIRECT_CHAIN && LNP22_USE_RBIT_BINARY && OUTER_RBIT_PRODUCT_DIGITS > 0
+  power = 1;
+  for(size_t i=1;i<OUTER_RBIT_PRODUCT_DIGITS;i++) power *= OUTER_RBIT_PRODUCT_BASE;
+  const unsigned __int128 denom = power*power;
+  /* ||beta*z|| <= ||beta||_1 ||z|| <= 2*N ||z||. */
+  const unsigned __int128 high = (unsigned __int128)16*(2*N)*(2*N)*
+                                 ctx->rhat_bits_len*N*((unsigned __int128)1<<(2*LNP22_LOG2STDEV1));
+  bound += ctx->rhat_bits_len*N*((uint64_t)(OUTER_RBIT_PRODUCT_DIGITS-1)*
+             OUTER_RBIT_PRODUCT_BASE*OUTER_RBIT_PRODUCT_BASE/4 + 2) +
+             (uint64_t)((high+denom-1)/denom);
+#endif
+  return bound + 16*N;
+}
 
 #ifndef OUTER_HASH_EXPANDED_STATEMENT
 #define OUTER_HASH_EXPANDED_STATEMENT 0
@@ -176,7 +240,7 @@ typedef struct {
 
 typedef struct {
   size_t count;
-  polx *owned[11];
+  polx *owned[12];
 } outer_frontend_storage;
 
 static void free_outer_frontend_storage(void *ptr) {
@@ -190,11 +254,11 @@ static void free_outer_frontend_storage(void *ptr) {
   free(storage);
 }
 
-static void attach_outer_frontend_storage(prncplstmnt *st, polx *owned[11]) {
+static void attach_outer_frontend_storage(prncplstmnt *st, polx *owned[12]) {
   outer_frontend_storage *storage = _malloc(sizeof(*storage));
   size_t i;
 
-  storage->count = 11;
+  storage->count = 12;
   for(i=0;i<storage->count;i++)
     storage->owned[i] = owned[i];
   st->frontend_data = storage;
@@ -290,6 +354,43 @@ static int decompose_segment_five_digits(poly *dst[OUTER_DIRECT_P_DIGITS],
   if(invalid)
     fprintf(stderr,"ERROR: %s decomposition digit out of int16 range\n",label);
   return invalid;
+}
+
+static int decompose_rbit_product_digits(
+    poly *dst[OUTER_RBIT_PRODUCT_DIGITS], const int64_t *src,
+    size_t len, const char *label) {
+#if OUTER_RBIT_PRODUCT_DIGITS == 0
+  (void)dst; (void)src; (void)len; (void)label;
+  return 0;
+#else
+  const size_t count = len*N;
+  size_t i;
+  int invalid = 0;
+
+#if defined(_OPENMP) && LNP22_ROW_PARALLEL
+#pragma omp parallel for schedule(static) if(count >= LNP22_PARALLEL_MIN_LEN) reduction(|:invalid)
+#endif
+  for(i=0;i<count;i++) {
+    int64_t q = src[i];
+    int64_t digit[OUTER_RBIT_PRODUCT_DIGITS];
+    size_t j;
+
+    for(j=0;j<OUTER_RBIT_PRODUCT_DIGITS-1;j++) {
+      const int64_t next =
+          balanced_round_div_i64(q,OUTER_RBIT_PRODUCT_BASE);
+      digit[j] = q - OUTER_RBIT_PRODUCT_BASE*next;
+      q = next;
+    }
+    digit[OUTER_RBIT_PRODUCT_DIGITS-1] = q;
+    for(j=0;j<OUTER_RBIT_PRODUCT_DIGITS;j++) {
+      invalid |= outer_abs_i64(digit[j]) > 32767;
+      dst[j][i/N].vec[0].c[i%N] = (int16_t)digit[j];
+    }
+  }
+  if(invalid)
+    fprintf(stderr,"ERROR: %s decomposition digit out of int16 range\n",label);
+  return invalid;
+#endif
 }
 
 static void set_scaled_polxvec(polx *dst, const polx *src, size_t len, int64_t scale) {
@@ -590,6 +691,10 @@ static int generate_inner_instance(outer_instance *inst, uint64_t seed_offset) {
   compute_a3(inst->a3,&inst->ctx);
   inner_product_a3(inst->a3s2,inst->a3,inst->s2,inst->ctx.m2);
   GEN_PROFILE_MARK("s2+a3");
+  if(LNP22_DIRECT_CHAIN) {
+    compute_tA_rows(inst->tA,&inst->ctx,inst->ctx.s1,inst->s2);
+    bind_prechallenge_commitment(&inst->ctx,inst->tA);
+  }
   if(prepare_linear_fold_for_proof(&inst->ctx,inst->ufold_public,inst->s2)) {
     fprintf(stderr,"ERROR: failed to prepare inner folded linear relation\n");
     return 1;
@@ -599,10 +704,11 @@ static int generate_inner_instance(outer_instance *inst, uint64_t seed_offset) {
   if(batch_rounds > 1 && !LNP22_DIRECT_CHAIN)
     trim_ctx_for_batch(&inst->ctx);
 #if LNP22_COMBINE_TA_W
-  if(LNP22_DIRECT_CHAIN || batch_rounds > 1 || batch_ws != NULL)
+  if(!LNP22_DIRECT_CHAIN && (batch_rounds > 1 || batch_ws != NULL))
     compute_tA_rows(inst->tA,&inst->ctx,inst->ctx.s1,inst->s2);
 #else
-  compute_tA_rows(inst->tA,&inst->ctx,inst->ctx.s1,inst->s2);
+  if(!LNP22_DIRECT_CHAIN)
+    compute_tA_rows(inst->tA,&inst->ctx,inst->ctx.s1,inst->s2);
 #endif
   if(LNP22_DIRECT_CHAIN) {
     polx direct_check[1];
@@ -675,7 +781,7 @@ static int generate_inner_instance(outer_instance *inst, uint64_t seed_offset) {
                                        sigma_from_log2stdev(LNP22_LOG2STDEV1),
                                        LNP22_GAMMA1,
                                        inst->ctx.lnp_seed,NONCE_Y1_BASE + 1000000 + inst->rejection_rounds);
-        rej2 = reject_rej2_polxvec(inst->z2coeffs,inst->cs2coeffs,inst->ctx.m2*N,
+        rej2 = reject_z2_polxvec(inst->z2coeffs,inst->cs2coeffs,inst->ctx.m2*N,
                                    sigma_from_log2stdev(LNP22_LOG2STDEV2),
                                    LNP22_GAMMA2,
                                    inst->ctx.lnp_seed,NONCE_Y2_BASE + 1000000 + inst->rejection_rounds);
@@ -737,7 +843,7 @@ static int generate_inner_instance(outer_instance *inst, uint64_t seed_offset) {
                                            sigma_from_log2stdev(LNP22_LOG2STDEV1),
                                            LNP22_GAMMA1,
                                            inst->ctx.lnp_seed,NONCE_Y1_BASE + 1000000 + batch_base + bi);
-        ws->rej2 = reject_rej2_polxvec(ws->z2coeffs,ws->cs2coeffs,inst->ctx.m2*N,
+        ws->rej2 = reject_z2_polxvec(ws->z2coeffs,ws->cs2coeffs,inst->ctx.m2*N,
                                        sigma_from_log2stdev(LNP22_LOG2STDEV2),
                                        LNP22_GAMMA2,
                                        inst->ctx.lnp_seed,NONCE_Y2_BASE + 1000000 + batch_base + bi);
@@ -895,6 +1001,26 @@ static int generate_inner_instance(outer_instance *inst, uint64_t seed_offset) {
   return ok ? 0 : 1;
 }
 
+static void release_inner_secret_buffers(outer_instance *inst) {
+#define RELEASE(p) do { free(p); (p)=NULL; } while(0)
+  RELEASE(inst->z1);
+  RELEASE(inst->z2);
+#if !LNP22_COEFF_RESPONSE
+  RELEASE(inst->cs1);
+  RELEASE(inst->cs2);
+#endif
+  RELEASE(inst->y1);
+  RELEASE(inst->y2);
+  RELEASE(inst->z1coeffs);
+  RELEASE(inst->z2coeffs);
+  RELEASE(inst->cs1coeffs);
+  RELEASE(inst->cs2coeffs);
+  RELEASE(inst->ctx.s1);
+  RELEASE(inst->ctx.g1coeff);
+  for(size_t i=0;i<LNP22_NUM_BLOCKS;i++) RELEASE(inst->ctx.witness[i]);
+#undef RELEASE
+}
+
 static void free_outer_instance(outer_instance *inst) {
   free(inst->s2);
   free(inst->tA);
@@ -955,7 +1081,7 @@ static void prepare_selector_lnp22_verifier_static(selector_lnp22_ctx *ctx) {
 
 static int prepare_selector_lnp22_verifier_request(selector_lnp22_ctx *ctx,
                                                    const selector_lnp22_ctx *pub,
-                                                   polx *ufold_public) {
+                                                   polx *ufold_public, const polx *tA) {
   uint8_t ar_seed[16];
   size_t t;
 
@@ -979,6 +1105,8 @@ static int prepare_selector_lnp22_verifier_request(selector_lnp22_ctx *ctx,
   }
   polxvec_challenge(ctx->kprime,ctx->gdigits,ctx->selector_chal_seed,64);
   polxvec_challenge(ctx->alphavec,ctx->Lchain-1,ctx->selector_chal_seed,65);
+
+  bind_prechallenge_commitment(ctx,tA);
 
   if(ctx->rbit_const_lambda != 0) {
     polxvec_almostuniform(ctx->rbit_const_Bg,ctx->rbit_const_lambda * ctx->m2,
@@ -1323,7 +1451,10 @@ static void build_selector_lnp22_outer_statement_public(prncplstmnt *st,
   free(openfold);
 #if OUTER_USE_COMPACT_STATEMENT
   {
-    polx *owned[11] = {open1,open2,NULL,NULL,quadz,quadx,quadbits,quadz2,NULL,NULL,NULL};
+    polx *owned[12] = {
+      open1,open2,NULL,NULL,quadz,quadx,quadbits,quadz2,
+      NULL,NULL,NULL,NULL
+    };
     attach_outer_frontend_storage(st,owned);
   }
   open1 = open2 = linear1 = linear2 = NULL;
@@ -1794,7 +1925,10 @@ static void prepare_selector_lnp22_outer(prncplstmnt *st, witness *wt, uint64_t 
   free(openfold);
 #if OUTER_USE_COMPACT_STATEMENT
   {
-    polx *owned[11] = {open1,open2,linear1,linear2,quadz,quadx,quadbits,quadz2,NULL,NULL,NULL};
+    polx *owned[12] = {
+      open1,open2,linear1,linear2,quadz,quadx,quadbits,quadz2,
+      NULL,NULL,NULL,NULL
+    };
     attach_outer_frontend_storage(st,owned);
   }
   open1 = open2 = linear1 = linear2 = NULL;
@@ -1943,7 +2077,7 @@ static int test_outer_pack(uint64_t seed_offset) {
     clock_gettime(CLOCK_MONOTONIC,&req0);
     clock_gettime(CLOCK_MONOTONIC,&ctx0);
     if(prepare_selector_lnp22_verifier_request(&vctx,&pubinst.ctx,
-                                               vufold_public)) {
+                                               vufold_public,pubinst.tA)) {
       fprintf(stderr,"ERROR: invalid public coefficient-constantness transcript\n");
       ret = 1;
       selector_ctx_clear(&vctx);

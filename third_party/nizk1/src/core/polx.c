@@ -6,6 +6,7 @@
 #include "polx.h"
 #include "poly.h"
 #include "polz.h"
+#include <string.h>
 
 #ifndef POLX_FROMPOLY_PARALLEL_MIN_LEN
 #define POLX_FROMPOLY_PARALLEL_MIN_LEN 2048
@@ -33,6 +34,12 @@
 #endif
 #ifndef POLX_SPROD_BLOCK
 #define POLX_SPROD_BLOCK 64
+#endif
+#ifndef POLX_FUSED_MULADD
+#define POLX_FUSED_MULADD 1
+#endif
+#ifndef POLX_REFRESH_PARALLEL
+#define POLX_REFRESH_PARALLEL 1
 #endif
 #if POLX_SPROD_BLOCK < 0 || POLX_SPROD_BLOCK % 2
 #error "POLX_SPROD_BLOCK must be zero or a positive even number"
@@ -276,6 +283,10 @@ void polx_refresh(polx *r) {
 void polxvec_refresh(polx *r, size_t len) {
   size_t i;
 
+#if defined(_OPENMP) && POLX_REFRESH_PARALLEL
+  const int threads = MIN(omp_get_max_threads(),POLX_FROMPOLY_MAX_THREADS);
+#pragma omp parallel for schedule(static) num_threads(threads) if(len >= 1024 && !omp_in_parallel())
+#endif
   for(i=0;i<len;i++)
     polx_refresh(&r[i]);
 }
@@ -411,6 +422,16 @@ void polxvec_mul_add(polx *r, const polx *a, const polx *b, size_t len) {
 void polxvec_polx_mul_add(polx *r, const polx *a, const polx *b, size_t len) {
   size_t i;
 
+#if POLX_FUSED_MULADD
+  const polx fused_scalar = *a;
+  for(size_t off=0;off<len;off+=64) {
+    const size_t count = MIN(len-off,64);
+    for(i=0;i<K;i++)
+      polyvec_poly_pointwise_add_reduce(&r[off].vec[i],&fused_scalar.vec[i],
+                                        &b[off].vec[i],count,K,&primes[i]);
+  }
+  return;
+#endif
 #if POLX_POINTWISE_BLOCK > 0
   if(len > POLX_POINTWISE_BLOCK) {
     const polx scalar = *a;
@@ -520,6 +541,31 @@ void polxvec_scale_add(polx *r, const polx *a, size_t len, labrador_scalar s) {
   polxvec_reduce(r,len);
 }
 
+#if LOGQ == 72
+/* The fixed q72 CRT product is 158 bits and exceeds 2*q*q.  Centering the
+ * source first bounds each scalar product by q*q/4; no ring convolution
+ * occurs here.  Keep this specialization separate from smaller CRT sets. */
+void polxvec_scale_add_modq(polx *r, const polx *a, size_t len, labrador_scalar s) {
+  enum { BLOCK = 64 };
+  const size_t blocks = (len+BLOCK-1)/BLOCK;
+  s = scalar_mulq(s,1);
+#if defined(_OPENMP)
+  const int threads = MIN(omp_get_max_threads(),POLX_FROMPOLY_MAX_THREADS);
+#pragma omp parallel for schedule(static) num_threads(threads) if(len >= 256 && !omp_in_parallel())
+#endif
+  for(size_t block=0;block<blocks;block++) {
+    polx tmp[BLOCK];
+    const size_t off=block*BLOCK, count=MIN(BLOCK,len-off);
+    memcpy(tmp,a+off,count*sizeof(*tmp));
+    polxvec_refresh(tmp,count);
+    polxvec_scale(tmp,tmp,count,s);
+    polxvec_refresh(tmp,count);
+    polxvec_add(r+off,r+off,tmp,count);
+    polxvec_refresh(r+off,count);
+  }
+}
+#endif
+
 size_t polxvec_mul_extension(polx *c, const polx *a, const polx *b, size_t len, size_t deg, size_t mult) {
   size_t i,j,k = 0;
 
@@ -555,6 +601,25 @@ size_t polxvec_mul_extension(polx *c, const polx *a, const polx *b, size_t len, 
 
 size_t polxvec_collaps_add_extension(polx *c, const polx *a, const polx *b, size_t len, size_t deg, size_t mult) {
   size_t i,j,k = 0;
+
+  if(deg == 1 && mult == 1 && len >= 4096) {
+    const polx scalar = *a;
+    const size_t chunk = 256;
+#if defined(_OPENMP)
+    const int threads = MIN(POLX_EXTENSION_MAX_THREADS,omp_get_max_threads());
+#pragma omp parallel for schedule(static) num_threads(threads) if(!omp_in_parallel())
+#endif
+    for(size_t off=0;off<len;off+=chunk) {
+      const size_t count=MIN(chunk,len-off);
+      /* Partition whole polynomials, not CRT limbs: every thread owns its
+         cache lines, and all limbs of a chunk stay hot. Keep the legacy
+         unreduced-lane convention; callers perform the same reduction. */
+      for(size_t limb=0;limb<K;limb++)
+        polyvec_poly_pointwise_add(&c[off].vec[limb],&scalar.vec[limb],
+                                  &b[off].vec[limb],count,K,&primes[limb]);
+    }
+    return len;
+  }
 
 #if defined(_OPENMP)
   int threads = omp_get_max_threads();

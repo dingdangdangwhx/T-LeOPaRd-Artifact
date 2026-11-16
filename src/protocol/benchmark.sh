@@ -97,10 +97,13 @@ fi
 # single verifier measurement. Both verification and proof jobs are sequential.
 IFS=',' read -r -a online_servers <<< "$Q_SPEC"
 for server in "${online_servers[@]}"; do
-  one_verify="$("$CLIENT" verify-request "$pp_file" "$TAG_HEX" "$req_file")"
+  one_verify="$("$CLIENT" verify-request "$pp_file" "$TAG_HEX" "$req_file" "$preq_file")"
   require_ok "$one_verify" "verify-request server $server"
   printf '%s\n' "$one_verify" >> "$tmpdir/request_verifiers.log"
 done
+if [[ -n "${LEOPARD_VERIFY_RAW_LOG:-}" ]]; then
+  cp "$tmpdir/request_verifiers.log" "$LEOPARD_VERIFY_RAW_LOG"
+fi
 verify_req_out="$(awk -F= '/^[a-zA-Z0-9_]+=[0-9.]+$/ {sum[$1]+=$2;n[$1]++}
   END {for(k in sum) printf "%s=%.9f\n",k,sum[k]/n[k]}' "$tmpdir/request_verifiers.log")"
 blind_verify_total_sec="$(awk -F= '$1=="time_sec" {s+=$2} END {printf "%.9f",s}' "$tmpdir/request_verifiers.log")"

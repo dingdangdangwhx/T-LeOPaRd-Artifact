@@ -739,6 +739,7 @@ enum {
 #define LEOPARD_RICE_ENCODING (LOGQ == 72)
 #endif
 #define LEOPARD_RICE_VERSION (UINT64_C(1) << 63)
+#define LEOPARD_L2_WIDE_LENGTHS (UINT64_C(1) << 62)
 
 static size_t leopard_serialized_proof_bytes(const proof *pi) {
   size_t proj_bytes = 0;
@@ -770,7 +771,7 @@ static size_t leopard_serialized_proof_bytes(const proof *pi) {
          sizeof(uint32_t) +
          8 * sizeof(uint8_t) +
          2 * sizeof(uint16_t) +
-         2 * pi->r * sizeof(uint16_t) +
+         2 * pi->r * sizeof(uint32_t) +
          proj_bytes +
          packed_bytes;
 }
@@ -866,14 +867,14 @@ static int leopard_serialize_proof(uint8_t *buf, size_t len, size_t *off,
   if(leopard_buf_write(buf,len,off,tmp16u,sizeof(tmp16u)) != 0) return 1;
 
   for(i=0;i<pi->r;i++) {
-    if(pi->n[i] > UINT16_MAX || pi->nu[i] > UINT16_MAX)
+    if(pi->n[i] > UINT32_MAX || pi->nu[i] > UINT32_MAX)
       return 1;
-    leopard_store_u16_le(tmp16u,(uint16_t)pi->n[i]);
-    if(leopard_buf_write(buf,len,off,tmp16u,sizeof(tmp16u)) != 0) return 1;
+    leopard_store_u32_le(tmp32u,(uint32_t)pi->n[i]);
+    if(leopard_buf_write(buf,len,off,tmp32u,sizeof(tmp32u)) != 0) return 1;
   }
   for(i=0;i<pi->r;i++) {
-    leopard_store_u16_le(tmp16u,(uint16_t)pi->nu[i]);
-    if(leopard_buf_write(buf,len,off,tmp16u,sizeof(tmp16u)) != 0) return 1;
+    leopard_store_u32_le(tmp32u,(uint32_t)pi->nu[i]);
+    if(leopard_buf_write(buf,len,off,tmp32u,sizeof(tmp32u)) != 0) return 1;
   }
   {
     for(i=0;i<256;i += LEOPARD_PROJ_CHUNK_COEFFS) {
@@ -977,18 +978,20 @@ static int leopard_deserialize_proof(proof *pi, const uint8_t *buf, size_t len,
   pi->n = _malloc(2 * pi->r * sizeof(size_t));
   pi->nu = &pi->n[pi->r];
   for(i=0;i<pi->r;i++) {
-    if(leopard_buf_read(buf,len,off,tmp16u,sizeof(tmp16u)) != 0) {
+    if(leopard_buf_read(buf,len,off,tmp32u,sizeof(tmp32u)) != 0) {
       free_proof(pi);
       return 1;
     }
-    pi->n[i] = (size_t)leopard_load_u16_le(tmp16u);
+    pi->n[i] = (size_t)leopard_load_u32_le(tmp32u);
+    if(pi->n[i]>(1u<<20)) { free_proof(pi); return 1; }
   }
   for(i=0;i<pi->r;i++) {
-    if(leopard_buf_read(buf,len,off,tmp16u,sizeof(tmp16u)) != 0) {
+    if(leopard_buf_read(buf,len,off,tmp32u,sizeof(tmp32u)) != 0) {
       free_proof(pi);
       return 1;
     }
-    pi->nu[i] = (size_t)leopard_load_u16_le(tmp16u);
+    pi->nu[i] = (size_t)leopard_load_u32_le(tmp32u);
+    if(pi->nu[i]>(1u<<20)) { free_proof(pi); return 1; }
   }
   {
     for(i=0;i<256;i += LEOPARD_PROJ_CHUNK_COEFFS) {
@@ -1244,7 +1247,8 @@ static int leopard_serialize_composite(uint8_t **out, size_t *out_len,
   }
 
   buf = checked_malloc(total,"serialized composite");
-  leopard_store_u64_le(tmp64,p->l | (LEOPARD_RICE_ENCODING ? LEOPARD_RICE_VERSION : 0));
+  leopard_store_u64_le(tmp64,p->l | LEOPARD_L2_WIDE_LENGTHS |
+                       (LEOPARD_RICE_ENCODING ? LEOPARD_RICE_VERSION : 0));
   if(leopard_buf_write(buf,total,&off,tmp64,sizeof(tmp64)) != 0) {
     free(buf);
     return 1;
@@ -1278,8 +1282,9 @@ static int leopard_deserialize_composite(composite *p, const uint8_t *buf,
   if(leopard_buf_read(buf,len,&off,tmp64,sizeof(tmp64)) != 0)
     return 1;
   uint64_t header=leopard_load_u64_le(tmp64);
+  if(!(header & LEOPARD_L2_WIDE_LENGTHS)) return 1;
   int rice=(header & LEOPARD_RICE_VERSION)!=0;
-  p->l = (size_t)(header & ~LEOPARD_RICE_VERSION);
+  p->l = (size_t)(header & ~(LEOPARD_RICE_VERSION | LEOPARD_L2_WIDE_LENGTHS));
   if(p->l == 0 || p->l > 16) {
     p->l=0;
     return 1;
@@ -2003,7 +2008,7 @@ static int leopard_prepare_selector_public_ctx_snow(
     const polx *rbit_const_tg,
     const polx *rbit_const_h,
     size_t rbit_const_len,
-    const uint8_t ar_seed[16]) {
+    const uint8_t ar_seed[16], const polx *tA) {
 #if LNP22_DIRECT_CHAIN
   selector_ctx_init(ctx,pp->nizk1_seed);
   memcpy(ctx->statement_seed,tag_hash,LEOPARD_TAG_BYTES);
@@ -2015,8 +2020,7 @@ static int leopard_prepare_selector_public_ctx_snow(
                         ar_seed,NONCE_AR_BASE);
 
   derive_selector_chal_seed_from_public(ctx);
-  polxvec_challenge(ctx->kprime,ctx->gdigits,
-                    ctx->selector_chal_seed,64);
+  bind_prechallenge_commitment(ctx,tA);
   if(rbit_const_len != ctx->rbit_const_lambda)
     return 1;
   if(ctx->rbit_const_lambda != 0) {
@@ -2340,7 +2344,7 @@ static int leopard_generate_request_instance(outer_instance *inst,
                                      sigma_from_log2stdev(LNP22_LOG2STDEV1),
                                      LNP22_GAMMA1,
                                      inst->ctx.lnp_seed,NONCE_Y1_BASE + 1000000 + inst->rejection_rounds);
-      rej2 = reject_rej2_polxvec(inst->z2coeffs,inst->cs2coeffs,inst->ctx.m2*N,
+      rej2 = reject_z2_polxvec(inst->z2coeffs,inst->cs2coeffs,inst->ctx.m2*N,
                                  sigma_from_log2stdev(LNP22_LOG2STDEV2),
                                  LNP22_GAMMA2,
                                  inst->ctx.lnp_seed,NONCE_Y2_BASE + 1000000 + inst->rejection_rounds);
@@ -2387,7 +2391,7 @@ static int leopard_generate_request_instance(outer_instance *inst,
                                            sigma_from_log2stdev(LNP22_LOG2STDEV1),
                                            LNP22_GAMMA1,
                                            inst->ctx.lnp_seed,NONCE_Y1_BASE + 1000000 + batch_base + bi);
-        ws->rej2 = reject_rej2_polxvec(ws->z2coeffs,ws->cs2coeffs,inst->ctx.m2*N,
+        ws->rej2 = reject_z2_polxvec(ws->z2coeffs,ws->cs2coeffs,inst->ctx.m2*N,
                                        sigma_from_log2stdev(LNP22_LOG2STDEV2),
                                        LNP22_GAMMA2,
                                        inst->ctx.lnp_seed,NONCE_Y2_BASE + 1000000 + batch_base + bi);
@@ -2628,7 +2632,7 @@ static int leopard_generate_request_instance_preprocessed(
                                      sigma_from_log2stdev(LNP22_LOG2STDEV1),
                                      LNP22_GAMMA1,
                                      inst->ctx.lnp_seed,NONCE_Y1_BASE + 1000000 + inst->rejection_rounds);
-      rej2 = reject_rej2_polxvec(inst->z2coeffs,inst->cs2coeffs,inst->ctx.m2*N,
+      rej2 = reject_z2_polxvec(inst->z2coeffs,inst->cs2coeffs,inst->ctx.m2*N,
                                  sigma_from_log2stdev(LNP22_LOG2STDEV2),
                                  LNP22_GAMMA2,
                                  inst->ctx.lnp_seed,NONCE_Y2_BASE + 1000000 + inst->rejection_rounds);
@@ -2675,7 +2679,7 @@ static int leopard_generate_request_instance_preprocessed(
                                            sigma_from_log2stdev(LNP22_LOG2STDEV1),
                                            LNP22_GAMMA1,
                                            inst->ctx.lnp_seed,NONCE_Y1_BASE + 1000000 + batch_base + bi);
-        ws->rej2 = reject_rej2_polxvec(ws->z2coeffs,ws->cs2coeffs,inst->ctx.m2*N,
+        ws->rej2 = reject_z2_polxvec(ws->z2coeffs,ws->cs2coeffs,inst->ctx.m2*N,
                                        sigma_from_log2stdev(LNP22_LOG2STDEV2),
                                        LNP22_GAMMA2,
                                        inst->ctx.lnp_seed,NONCE_Y2_BASE + 1000000 + batch_base + bi);
@@ -2845,15 +2849,6 @@ static int leopard_finish_direct_inner_instance(outer_instance *inst) {
   polxvec_centered_to_i64(s2coeffs,inst->s2,inst->ctx.m2);
   compute_a3(inst->a3,&inst->ctx);
   inner_product_a3(inst->a3s2,inst->a3,inst->s2,inst->ctx.m2);
-  if(prepare_linear_fold_for_proof(
-         &inst->ctx,inst->ufold_public,inst->s2)) {
-    fprintf(stderr,
-            "ERROR: failed to prepare direct folded linear relation\n");
-    free(s1coeffs);
-    free(s2coeffs);
-    return 1;
-  }
-  compute_public_quad_rhs(inst->uquad_public,&inst->ctx);
 #if LEOPARD_DIRECT_COMBINE_TA_W
   /* The first masks do not depend on tA. Reuse each generated A1 row for
    * both products, retaining the same mask nonces and folding order. */
@@ -2866,6 +2861,14 @@ static int leopard_finish_direct_inner_instance(outer_instance *inst) {
 #else
   compute_tA_rows(inst->tA,&inst->ctx,inst->ctx.s1,inst->s2);
 #endif
+  bind_prechallenge_commitment(&inst->ctx,inst->tA);
+  if(prepare_linear_fold_for_proof(
+         &inst->ctx,inst->ufold_public,inst->s2)) {
+    free(s1coeffs);
+    free(s2coeffs);
+    return 1;
+  }
+  compute_public_quad_rhs(inst->uquad_public,&inst->ctx);
   derive_direct_chain_fold(&inst->ctx,inst->tA);
   compute_quad_g1_coeffs(&inst->ctx);
   {
@@ -2924,7 +2927,7 @@ static int leopard_finish_direct_inner_instance(outer_instance *inst) {
           sigma_from_log2stdev(LNP22_LOG2STDEV1),LNP22_GAMMA1,
           inst->ctx.lnp_seed,
           NONCE_Y1_BASE + 1000000 + inst->rejection_rounds);
-      rej2 = reject_rej2_polxvec(
+      rej2 = reject_z2_polxvec(
           inst->z2coeffs,inst->cs2coeffs,inst->ctx.m2*N,
           sigma_from_log2stdev(LNP22_LOG2STDEV2),LNP22_GAMMA2,
           inst->ctx.lnp_seed,
@@ -3553,6 +3556,81 @@ fail:
   return 1;
 }
 #else
+#ifndef OUTER_PACK_LINEAR_TAIL
+#define OUTER_PACK_LINEAR_TAIL 1
+#endif
+
+/* Concatenate blocks that never occur in quadratic terms. This is a
+ * permutation of coefficients, so the joint norm budget is unchanged. */
+static void outer_linear_tail_layout(const size_t old_n[OUT_R],
+                                     size_t map[OUT_R], size_t off[OUT_R],
+                                     size_t new_n[OUT_R]) {
+  size_t next=0, total=0;
+  for(size_t i=0;i<OUT_R;i++) {
+    off[i]=0;
+    if(i==OUT_T1 || i==OUT_Z20 || i==OUT_Z21) continue;
+    map[i]=next;
+    new_n[next++]=old_n[i];
+  }
+  const size_t tails[]={OUT_T0,OUT_T1,OUT_Z20,OUT_Z21};
+  for(size_t j=0;j<4;j++) {
+    const size_t i=tails[j];
+    map[i]=map[OUT_T0];
+    off[i]=total;
+    total+=old_n[i];
+  }
+  new_n[map[OUT_T0]]=total;
+}
+
+static void outer_pack_linear_witness(witness *wt) {
+  size_t map[OUT_R], off[OUT_R], n[OUT_R];
+  witness packed={0};
+  outer_linear_tail_layout(wt->n,map,off,n);
+  init_witness_raw(&packed,OUT_R-3,n);
+  for(size_t i=0;i<OUT_R;i++) {
+    memcpy(packed.s[map[i]]+off[i],wt->s[i],wt->n[i]*sizeof(poly));
+  }
+  for(size_t i=0;i<packed.r;i++)
+    packed.normsq[i]=polyvec_sprodz(packed.s[i],packed.s[i],packed.n[i]);
+  free_witness(wt);
+  *wt=packed;
+}
+
+static int outer_pack_linear_statement(prncplstmnt *st) {
+  size_t map[OUT_R], off[OUT_R], n[OUT_R];
+  if(st->r!=OUT_R || st->build_postcommit_cnst) return 1;
+  outer_linear_tail_layout(st->n,map,off,n);
+  /* Refuse a future relation that uses any concatenated block quadratically. */
+  for(size_t k=0;k<st->k;k++) {
+    sparsemat *a=st->cnst[k].a;
+    for(size_t j=0;j<a->len;j++) {
+      const size_t x=a->rows[j], y=a->cols[j];
+      if(map[x]==map[OUT_T0] || map[y]==map[OUT_T0]) return 1;
+    }
+  }
+  for(size_t k=0;k<st->k;k++) {
+    sparsecnst *c=&st->cnst[k];
+    for(size_t j=0;j<c->nz;j++) {
+      c->off[j]+=off[c->idx[j]];
+      c->idx[j]=map[c->idx[j]];
+    }
+    for(size_t j=0;j<c->a->len;j++) {
+      c->a->rows[j]=map[c->a->rows[j]];
+      c->a->cols[j]=map[c->a->cols[j]];
+    }
+  }
+  st->r=OUT_R-3;
+  memcpy(st->n,n,st->r*sizeof(*n));
+  shake128incctx hash;
+  shake128_inc_init(&hash);
+  absorb_bytes(&hash,"outer-linear-tail-concat-v1",sizeof("outer-linear-tail-concat-v1"));
+  absorb_bytes(&hash,st->h,sizeof(st->h));
+  for(size_t i=0;i<st->r;i++) absorb_u64(&hash,st->n[i]);
+  shake128_inc_finalize(&hash);
+  shake128_inc_squeeze(st->h,sizeof(st->h),&hash);
+  return 0;
+}
+
 static int leopard_prepare_outer_witness(
     witness *wt, const outer_instance *inst,
     uint64_t *betasq_out) {
@@ -3568,6 +3646,8 @@ static int leopard_prepare_outer_witness(
   polx *p = NULL;
   __int128 *pcoeffs = NULL;
   poly *pdst[OUTER_DIRECT_P_DIGITS];
+  polx *pbit = NULL;
+  int64_t *pbitcoeffs = NULL;
 
   n[OUT_B0] = inst->ctx.b_len;
   n[OUT_B1] = inst->ctx.b_len;
@@ -3592,6 +3672,15 @@ static int leopard_prepare_outer_witness(
   polxvec_centered_to_i128(pcoeffs,p,p_len);
   for(i=0;i<OUTER_DIRECT_P_DIGITS;i++)
     pdst[i] = wt->s[OUT_P0+i];
+#if OUTER_RBIT_PRODUCT_DIGITS > 0
+  for(i=0;i<binary_len;i++)
+    polx_mul(&pbit[i],&inst->ctx.rbit_weight[i],
+             &inst->z1[inst->ctx.off[LNP22_RHAT_BITS_BLOCK]+i]);
+  polxvec_refresh(pbit,binary_len);
+  polxvec_centered_to_i64(pbitcoeffs,pbit,binary_len);
+  for(i=0;i<OUTER_RBIT_PRODUCT_DIGITS;i++)
+    pbitdst[i] = wt->s[OUT_PBIT0+i];
+#endif
 
   if(decompose_segment_two_digits(
          wt->s[OUT_B0],wt->s[OUT_B1],
@@ -3612,11 +3701,17 @@ static int leopard_prepare_outer_witness(
          &inst->z1coeffs[
              inst->ctx.off[LNP22_RHAT_BITS_BLOCK]*N],
          binary_len,OUTER_XY_DECOMP_BASE,"RBIT") ||
+#if OUTER_RBIT_PRODUCT_DIGITS > 0
+     decompose_rbit_product_digits(
+         pbitdst,pbitcoeffs,binary_len,"PBIT") ||
+#endif
      decompose_segment_two_digits(
          wt->s[OUT_Z20],wt->s[OUT_Z21],inst->z2coeffs,
          inst->ctx.m2,OUTER_Z2_DECOMP_BASE,"z2")) {
     free(p);
     free(pcoeffs);
+    free(pbit);
+    free(pbitcoeffs);
     free_witness(wt);
     return 1;
   }
@@ -3630,6 +3725,14 @@ static int leopard_prepare_outer_witness(
   *betasq_out = betasq;
   free(p);
   free(pcoeffs);
+  free(pbit);
+  free(pbitcoeffs);
+  if(betasq > outer_admissible_betasq(&inst->ctx)) {
+    free_witness(wt);
+    return 1;
+  }
+  *betasq_out = outer_admissible_betasq(&inst->ctx);
+  if(OUTER_PACK_LINEAR_TAIL) outer_pack_linear_witness(wt);
   return 0;
 }
 
@@ -3654,7 +3757,7 @@ static int leopard_prepare_outer_statement(
     build_selector_lnp22_outer_statement_public(
         st,ctx,tA,w,vlin,tq,vq,c,a3,ufold_public,betasq);
   free(a3);
-  return 0;
+  return OUTER_PACK_LINEAR_TAIL ? outer_pack_linear_statement(st) : 0;
 }
 #endif
 
@@ -3877,6 +3980,7 @@ static int leopard_nizk1_request_prove(leopard_nizk1_request **out_req,
     fprintf(stderr,"request raw outer relation failed\n");
     goto fail;
   }
+  release_inner_secret_buffers(&inst);
   if(composite_prove_principle(&outer_pf,&outer_st,&outer_wt) != 0)
     goto fail;
   clock_gettime(CLOCK_MONOTONIC,&t1);
@@ -4034,6 +4138,7 @@ static int leopard_nizk1_request_prove_preprocessed(
     fprintf(stderr,"request raw outer relation failed\n");
     goto fail;
   }
+  release_inner_secret_buffers(&inst);
   if(composite_prove_principle(&outer_pf,&outer_st,&outer_wt) != 0)
     goto fail;
   clock_gettime(CLOCK_MONOTONIC,&t1);
@@ -4128,13 +4233,19 @@ static int leopard_nizk1_request_verify(const leopard_pp *pp,
   struct timespec t0, t1;
 
   memset(&g_last_verify_profile,0,sizeof(g_last_verify_profile));
+  if(req->cr_len != UMC_N+UMC_ELL+DEMO_M || req->cx_len != DEMO_M ||
+     req->kmsis != LNP22_KMSIS || req->rbit_const_len != LNP22_RBIT_CONSTCHECK_LAMBDA)
+    return 1;
+  for(size_t i=0;i<req->cr_len*N;i++)
+    if(req->cr_coeffs[i] < -(UMC_MODP/2) || req->cr_coeffs[i] > UMC_MODP/2)
+      return 1;
   leopard_tag_hash(tag_hash,tag,tag_len);
   clock_gettime(CLOCK_MONOTONIC,&t0);
   if(leopard_prepare_selector_public_ctx_snow(
          &ctx,pp,tag_hash,req->selected_j,
          req->cr,req->cx,
          req->rbit_const_tg,req->rbit_const_h,
-         req->rbit_const_len,req->ar_seed)) {
+         req->rbit_const_len,req->ar_seed,req->tA)) {
     selector_ctx_clear(&ctx);
     return 1;
   }
@@ -4146,6 +4257,9 @@ static int leopard_nizk1_request_verify(const leopard_pp *pp,
     selector_ctx_clear(&ctx);
     return 1;
   }
+
+  if(req->outer_betasq != outer_admissible_betasq(&ctx))
+    goto out;
 
   clock_gettime(CLOCK_MONOTONIC,&t0);
   fs_challenge(c_check,&ctx,req->tA,req->w,req->vlin,req->tq,req->vq);
@@ -4353,6 +4467,15 @@ int leopard_nizk1_request_verify_data(const leopard_pp *pp,
                                       const leopard_request_data *req_data) {
   leopard_nizk1_request *req;
   int ret;
+  if(req_data == NULL || req_data->cr_rows != UMC_N+UMC_ELL+DEMO_M ||
+     req_data->cx_rows != 1 || req_data->cx_cols != DEMO_M ||
+     req_data->kmsis != LNP22_KMSIS ||
+     req_data->rbit_const_len != LNP22_RBIT_CONSTCHECK_LAMBDA ||
+     req_data->cr_coeffs == NULL)
+    return 1;
+  for(size_t i=0;i<req_data->cr_rows*N;i++)
+    if(req_data->cr_coeffs[i] < -(UMC_MODP/2) || req_data->cr_coeffs[i] > UMC_MODP/2)
+      return 1;
   size_t cx_len = req_data->cx_rows * req_data->cx_cols;
 
   req = leopard_request_alloc(req_data->cr_rows,cx_len,req_data->kmsis,

@@ -80,6 +80,100 @@ static int build_direct_raut_postcommit_constraints(
   *out_k = OUTER_RAUT_ALPHA_ROUNDS;
   return 0;
 }
+#else
+#define OUT_PBIT0 OUT_Z20
+#if OUTER_RBIT_PRODUCT_DIGITS > 0
+static int build_direct_rbit_product_postcommit_constraints(
+    sparsecnst **out, size_t *out_k, const prncplstmnt *st,
+    const uint8_t postcommit_h[16]) {
+  const outer_frontend_storage *storage = st->frontend_data;
+  const size_t binary_len = st->n[OUT_RBIT0];
+  const size_t nz = 2 + OUTER_RBIT_PRODUCT_DIGITS;
+  const polx *beta;
+  sparsecnst *cnst;
+  polx *alpha;
+  polz *alpha_z;
+  size_t round;
+
+  *out = NULL;
+  *out_k = 0;
+  if(!storage || storage->count < 12 || !storage->owned[11] ||
+     binary_len == 0 || st->n[OUT_RBIT1] != binary_len)
+    return 1;
+  for(size_t d=0;d<OUTER_RBIT_PRODUCT_DIGITS;d++)
+    if(st->n[OUT_PBIT0+d] != binary_len)
+      return 1;
+
+  beta = storage->owned[11];
+  cnst = _malloc(OUTER_RBIT_PRODUCT_CHECK_ROUNDS*sizeof(*cnst));
+  memset(cnst,0,OUTER_RBIT_PRODUCT_CHECK_ROUNDS*sizeof(*cnst));
+  alpha = alloc_polxvec(binary_len);
+  alpha_z = _aligned_alloc(64,binary_len*sizeof(*alpha_z));
+  for(round=0;round<OUTER_RBIT_PRODUCT_CHECK_ROUNDS;round++) {
+    polx *buf;
+    size_t d, i;
+
+    /*
+     * q56, q64 and q72 satisfy ord_128(q)=32, so every nonzero ideal has at
+     * least q^32 elements.  One uniform ring fold exceeds 128-bit soundness.
+     * Check the full ring equation, not only its constant coefficient.
+     */
+    polzvec_uniform(
+        alpha_z,binary_len,postcommit_h,
+        0x5042495400000000ULL + round*binary_len);
+    polzvec_topolxvec(alpha,alpha_z,binary_len);
+    buf = init_sparsecnst_half(&cnst[round],st->r,nz,
+                               nz*binary_len,1,0,1);
+
+    cnst[round].idx[0] = OUT_RBIT0;
+    cnst[round].off[0] = 0;
+    cnst[round].len[0] = binary_len;
+    cnst[round].mult[0] = 1;
+    cnst[round].phi[0] = buf;
+    buf += binary_len;
+    cnst[round].idx[1] = OUT_RBIT1;
+    cnst[round].off[1] = 0;
+    cnst[round].len[1] = binary_len;
+    cnst[round].mult[1] = 1;
+    cnst[round].phi[1] = buf;
+    buf += binary_len;
+    for(d=0;d<OUTER_RBIT_PRODUCT_DIGITS;d++) {
+      const size_t k = 2+d;
+
+      cnst[round].idx[k] = OUT_PBIT0+d;
+      cnst[round].off[k] = 0;
+      cnst[round].len[k] = binary_len;
+      cnst[round].mult[k] = 1;
+      cnst[round].phi[k] = buf;
+      buf += binary_len;
+    }
+
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static) if(binary_len >= 4096)
+#endif
+    for(i=0;i<binary_len;i++) {
+      polx_mul(&cnst[round].phi[0][i],&alpha[i],&beta[i]);
+      polx_neg(&cnst[round].phi[0][i],&cnst[round].phi[0][i]);
+      polx_scale(&cnst[round].phi[1][i],&cnst[round].phi[0][i],
+                  OUTER_XY_DECOMP_BASE);
+      for(size_t digit=0;digit<OUTER_RBIT_PRODUCT_DIGITS;digit++)
+        polx_scale(&cnst[round].phi[2+digit][i],&alpha[i],
+                   outer_pow_i64(OUTER_RBIT_PRODUCT_BASE,(int)digit));
+    }
+    /* Bound these full-width coefficients before subsequent small folds. */
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static) if(binary_len >= 4096)
+#endif
+    for(size_t off=0;off<nz*binary_len;off+=256)
+      polxvec_refresh(&cnst[round].phi[0][off],MIN(256,nz*binary_len-off));
+  }
+  free(alpha);
+  free(alpha_z);
+  *out = cnst;
+  *out_k = OUTER_RBIT_PRODUCT_CHECK_ROUNDS;
+  return 0;
+}
+#endif
 #endif
 
 static void compute_direct_outer_p(polx *p, const selector_lnp22_ctx *ctx,
@@ -173,6 +267,10 @@ static void build_direct_outer_statement(
 #endif
   sparsecnst *cnst;
 
+  if(betasq != outer_admissible_betasq(ctx)) {
+    fprintf(stderr,"ERROR: noncanonical outer norm budget\n");
+    exit(1);
+  }
   tail_len = ctx->rhat_len + ctx->umc_eua_len + ctx->umc_eub_len +
              ctx->umc_r_len + ctx->umc_va_len + ctx->umc_vb_len;
   binary_len = LNP22_USE_NATIVE_FOLD_BINARY ? ctx->rhat_len :
@@ -205,12 +303,21 @@ static void build_direct_outer_statement(
   }
 #if LNP22_USE_NATIVE_FOLD_BINARY
   st->build_postcommit_cnst = build_direct_raut_postcommit_constraints;
+#else
+  st->build_postcommit_cnst = NULL;
 #endif
 
   shake128_inc_init(&shakectx);
   absorb_outer_compact_statement(&shakectx,ctx,tA,w,vlin,tq,vq,c);
+  absorb_bytes(&shakectx,"rbit-umc-arp-nowrap-v1",sizeof("rbit-umc-arp-nowrap-v1"));
+  absorb_u64(&shakectx,RBIT_ARP_LIMIT);
+  absorb_u64(&shakectx,RBIT_ARP_LOGSIGMA);
   absorb_u64(&shakectx,LNP22_USE_NATIVE_FOLD_BINARY ?
-             OUTER_RAUT_ALPHA_ROUNDS : 0);
+             OUTER_RAUT_ALPHA_ROUNDS : OUTER_RBIT_PRODUCT_CHECK_ROUNDS);
+#if !LNP22_USE_NATIVE_FOLD_BINARY
+  absorb_u64(&shakectx,OUTER_RBIT_PRODUCT_DIGITS);
+  absorb_u64(&shakectx,OUTER_RBIT_PRODUCT_BASE);
+#endif
 
   openfold = alloc_polxvec(ctx->kmsis);
   open1 = alloc_polxvec(ctx->m1);
@@ -250,8 +357,10 @@ static void build_direct_outer_statement(
   for(i=0;i<binary_len;i++)
     polxvec_copy(&quadbinary[i],tmpq,1);
 #else
-  for(i=0;i<binary_len;i++)
-    polx_neg(&quadbinary[i],c);
+  for(i=0;i<binary_len;i++) {
+    umc_quad_linear(&quadbinary[i],ctx,i);
+    polx_mul(&quadbinary[i],c,&quadbinary[i]);
+  }
 #endif
   polxvec_copy(quadz2,a3,ctx->m2);
 #if LNP22_USE_NATIVE_FOLD_BINARY
@@ -384,7 +493,8 @@ static void build_direct_outer_statement(
   append_cnst_view(cnst,&i,OUT_Z20,ctx->m2,quadz2,1);
   append_cnst_view(cnst,&i,OUT_Z21,ctx->m2,quadz2,OUTER_Z2_DECOMP_BASE);
   cnst->a->len = 2*OUTER_DIRECT_P_DIGITS +
-                 (LNP22_USE_NATIVE_FOLD_BINARY ? 4 : 3);
+                 (LNP22_USE_NATIVE_FOLD_BINARY ?
+                  4 : 3);
   {
     size_t idx = 0, xa, pd;
 
@@ -414,18 +524,17 @@ static void build_direct_outer_statement(
       }
     }
 #else
-    cnst->a->rows[idx] = OUT_RBIT0;
-    cnst->a->cols[idx] = OUT_RBIT0;
-    set_const_coeff(&cnst->a->coeffs[idx],1);
-    idx++;
-    cnst->a->rows[idx] = OUT_RBIT0;
-    cnst->a->cols[idx] = OUT_RBIT1;
-    set_const_coeff(&cnst->a->coeffs[idx],2*OUTER_XY_DECOMP_BASE);
-    idx++;
-    cnst->a->rows[idx] = OUT_RBIT1;
-    cnst->a->cols[idx] = OUT_RBIT1;
-    set_const_coeff(&cnst->a->coeffs[idx],
-                    outer_pow_i64(OUTER_XY_DECOMP_BASE,2));
+    for(size_t ra=0;ra<2;ra++) {
+      for(size_t rd=ra;rd<2;rd++) {
+        cnst->a->rows[idx] = OUT_RBIT0 + ra;
+        cnst->a->cols[idx] = OUT_RBIT0 + rd;
+        set_direct_product_coeff(
+            &cnst->a->coeffs[idx],
+            (ra==rd ? 1 : 2)*outer_pow_i64(OUTER_XY_DECOMP_BASE,(int)ra),
+            outer_pow_i64(OUTER_XY_DECOMP_BASE,(int)rd),1);
+        idx++;
+      }
+    }
 #endif
   }
   polxvec_copy(cnst->b,quadrhs,1);
@@ -437,7 +546,8 @@ static void build_direct_outer_statement(
   free(openrhs);
   {
     polx *owned_directD = NULL;
-    polx *owned[11];
+    polx *owned_rbit_weight = NULL;
+    polx *owned[12];
 
     if(transfer_ctx_storage) {
       ctx->lincoeff = NULL;
@@ -446,9 +556,17 @@ static void build_direct_outer_statement(
       ctx->directD = NULL;
       bitweight = ctx->xbit_weight;
       ctx->xbit_weight = NULL;
+#if !LNP22_USE_NATIVE_FOLD_BINARY
+      owned_rbit_weight = ctx->rbit_weight;
+      ctx->rbit_weight = NULL;
+#endif
     } else {
       linear1 = NULL;
       linear2 = NULL;
+#if !LNP22_USE_NATIVE_FOLD_BINARY
+      owned_rbit_weight = alloc_polxvec(binary_len);
+      polxvec_copy(owned_rbit_weight,ctx->rbit_weight,binary_len);
+#endif
     }
     owned[0] = open1;
     owned[1] = open2;
@@ -461,6 +579,7 @@ static void build_direct_outer_statement(
     owned[8] = pscale;
     owned[9] = owned_directD;
     owned[10] = transfer_ctx_storage ? bitweight : NULL;
+    owned[11] = owned_rbit_weight;
     attach_outer_frontend_storage(st,owned);
   }
 }
@@ -487,10 +606,14 @@ static void prepare_selector_lnp22_outer_direct(
   size_t p_len;
   uint64_t betasq = 0;
   polx *p = NULL;
+  polx *pbit = NULL;
   polx *raut = NULL;
   __int128 *pcoeffs = NULL;
+  int64_t *pbitcoeffs = NULL;
   int64_t *rautcoeffs = NULL;
   poly *pdst[OUTER_DIRECT_P_DIGITS];
+#if !LNP22_USE_NATIVE_FOLD_BINARY
+#endif
 
   clock_gettime(CLOCK_MONOTONIC,&prepare_start);
   if(generate_inner_instance(&inst,seed_offset)) {
@@ -533,6 +656,15 @@ static void prepare_selector_lnp22_outer_direct(
   pcoeffs = _malloc(p_len*N*sizeof(*pcoeffs));
   compute_direct_outer_p(p,&inst.ctx,inst.z1);
   polxvec_centered_to_i128(pcoeffs,p,p_len);
+#if !LNP22_USE_NATIVE_FOLD_BINARY && OUTER_RBIT_PRODUCT_DIGITS > 0
+  pbit = alloc_polxvec(binary_len);
+  pbitcoeffs = _malloc(binary_len*N*sizeof(*pbitcoeffs));
+  for(i=0;i<binary_len;i++)
+    polx_mul(&pbit[i],&inst.ctx.rbit_weight[i],
+             &inst.z1[inst.ctx.off[LNP22_RHAT_BITS_BLOCK] + i]);
+  polxvec_refresh(pbit,binary_len);
+  polxvec_centered_to_i64(pbitcoeffs,pbit,binary_len);
+#endif
 #if LNP22_USE_NATIVE_FOLD_BINARY
   raut = alloc_polxvec(binary_len);
   rautcoeffs = _malloc(binary_len*N*sizeof(*rautcoeffs));
@@ -597,6 +729,8 @@ static void prepare_selector_lnp22_outer_direct(
 #endif
   for(i=0;i<OUTER_DIRECT_P_DIGITS;i++)
     pdst[i] = wt->s[OUT_P0+i];
+#if !LNP22_USE_NATIVE_FOLD_BINARY
+#endif
 
   if(decompose_segment_two_digits(
          wt->s[OUT_B0],wt->s[OUT_B1],
@@ -634,6 +768,11 @@ static void prepare_selector_lnp22_outer_direct(
     betasq += wt->normsq[i];
   }
   betasq += 16*N;
+  if(betasq > outer_admissible_betasq(&inst.ctx)) {
+    fprintf(stderr,"ERROR: outer witness exceeds public admission budget\n");
+    exit(1);
+  }
+  betasq = outer_admissible_betasq(&inst.ctx);
 
   build_direct_outer_statement(st,&inst.ctx,inst.tA,inst.w,inst.vlin,
                                inst.tq,inst.vq,inst.c,inst.a3,
@@ -783,6 +922,8 @@ static void prepare_selector_lnp22_outer_direct(
 
   free(p);
   free(pcoeffs);
+  free(pbit);
+  free(pbitcoeffs);
   free(raut);
   free(rautcoeffs);
   if(public_transcript != NULL) {

@@ -54,6 +54,7 @@ included proof-parameter headers.
 ```sh
 make parameters
 make proof-parameters
+make client-parameters
 ```
 
 `make parameters` writes the kappa = 32 protocol candidates to
@@ -63,9 +64,20 @@ make proof-parameters
 sage -python parameters/compute.py --kappa 16 32 64 --output results/parameters.json
 ```
 
-These are protocol parameter screens, not a certificate for the composed proof
-system. The benchmark uses a fixed reproducible client fixture and fresh server
-coins. This is research code, not a production cryptographic service.
+The q72 client uses a binary-opening commitment (modulus 65437, rank 14),
+masked Bin1 range checks, and a verifier-enforced outer squared budget
+1653435896617783. The conditional inner MSIS screen uses extraction slack 3,
+rank 24 and randomness dimension 74. `make client-parameters` checks the
+commitment, lifting/no-wrap inequalities, and ideal challenge filter.
+These screens are not a certificate for the composed proof system: the complete
+recursive extraction, simulation, and concrete Fiat--Shamir loss analysis remain
+separate proof obligations.
+
+The benchmark uses client fixture seed 2 (one rejection round) and fresh server
+coins. Other client seeds can require more rounds; these timings are not averages
+over fresh client randomness. This is research code, not a production service.
+The revised q72 proof/preprocessing format is not compatible with earlier files;
+regenerate them together. The semi-honest parameter sets are unchanged.
 
 ## Layout
 
@@ -74,5 +86,6 @@ coins. This is research code, not a production cryptographic service.
 - `src/lazer/`, `third_party/`: proof and arithmetic dependencies.
 
 Run `make clean` to remove build products. Dependency licenses are retained.
-`OMP_NUM_THREADS=8 make check` additionally tests server-proof rejection and
-single/aggregate commitment extraction for both with-NIZK profiles.
+`OMP_NUM_THREADS=8 make check` additionally tests both proof backends, changed
+norm budgets, ARP boundaries, packed constraints, cached preprocessing, and
+single/aggregate server commitment extraction for both with-NIZK profiles.

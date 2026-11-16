@@ -11,7 +11,9 @@
 #define TAU1 32
 #define TAU2 8
 #define T 14  // challenge operator norm
-#define SLACK 2 // FIXME
+/* Bin1 JL, 256 rows, threshold 256*beta^2: sqrt(256/30) < 3. */
+#define SLACK 3
+#define JL_BYTES (2*256*N/8)
 
 #if LOGQ == 24
 #define QOFF 3

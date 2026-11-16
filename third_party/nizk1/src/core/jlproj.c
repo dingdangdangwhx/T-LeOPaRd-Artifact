@@ -35,7 +35,7 @@ static int64_t jl_center_u64_modq(uint64_t x) {
  * 8 qwords -> zvec: 1 col stride
  */
 
-void poly_jlproj_add(int32_t out[256], const poly *in, const uint8_t mat[256*N/8]) {
+static void poly_jlproj_sign_add(int32_t out[256], const poly *in, const uint8_t mat[256*N/8]) {
   int i;
   __m512i a,b,c,d;
   __m512i e,f,g,h;
@@ -242,11 +242,22 @@ void poly_jlproj_add(int32_t out[256], const poly *in, const uint8_t mat[256*N/8
   }
 }
 
+void poly_jlproj_add(int32_t out[256], const poly *in, const uint8_t mat[JL_BYTES]) {
+  int32_t pair[256] = {0};
+  /* (S0+S1)/2 has probabilities 1/4, 1/2, 1/4 on -1,0,1. */
+  poly_jlproj_sign_add(pair,in,mat);
+  poly_jlproj_sign_add(pair,in,mat+256*N/8);
+  for(size_t j=0;j<256;j++) {
+    uint32_t v = (uint32_t)out[j] + (uint32_t)(pair[j]/2);
+    memcpy(&out[j],&v,sizeof(v));
+  }
+}
+
 void polyvec_jlproj_add(int32_t r[256], const poly *p, size_t len, const uint8_t *mat) {
   size_t i;
 
   for(i=0;i<len;i++)
-    poly_jlproj_add(r,&p[i],&mat[256*N/8*i]);
+    poly_jlproj_add(r,&p[i],&mat[JL_BYTES*i]);
 }
 
 static void jlproj_collapsmat32(int64_t *row, const uint8_t *mat, size_t len, const int64_t alpha[32]) {
@@ -788,7 +799,7 @@ static void expand_challenge(int64_t alpha[256], const uint8_t buf[256*QBYTES]) 
 #endif
 }
 
-void polxvec_jlproj_collapsmat(polx *r, const uint8_t *mat, size_t len, const uint8_t buf[256*QBYTES]) {
+static void polxvec_jlproj_sign_collapsmat(polx *r, const uint8_t *mat, size_t len, const uint8_t buf[256*QBYTES]) {
 #if LOGQ != 64
   const __m512i qoff = _mm512_set1_epi64(QOFF);
   const __m512i mask = _mm512_set1_epi64(((uint64_t)1 << LOGQ) - 1);
@@ -931,7 +942,7 @@ static void jl_expand_wide(__int128 alpha[256], const uint8_t *buf) {
   }
 }
 
-void polxvec_jlproj_collapsmat(polx *r, const uint8_t *mat, size_t len,
+static void polxvec_jlproj_sign_collapsmat(polx *r, const uint8_t *mat, size_t len,
                               const uint8_t buf[256*QBYTES]) {
   __int128 alpha[256];
   jl_expand_wide(alpha,buf);
@@ -1009,19 +1020,99 @@ static inline int64_t _mm512_hsum_epi64(__m512i a) {
 }
 #endif
 
-uint64_t jlproj_normsq(const int32_t p[256]) {
-  int i;
-  __m512i f,g,s;
-
-  s = _mm512_setzero_si512();
-  for(i=0;i<256/16;i++) {
-    f = _mm512_loadu_si512(&p[16*i]);
-    g = _mm512_mul_epi32(f,f);
-    f = _mm512_srli_epi64(f,32);
-    f = _mm512_mul_epi32(f,f);
-    f = _mm512_add_epi64(f,g);
-    s = _mm512_add_epi64(f,s);
+void polxvec_jlproj_collapsmat_reference(polx *r, const uint8_t *mat, size_t len,
+                              const uint8_t buf[256*QBYTES]) {
+  const size_t chunk = 4096, plane = 256*N/8;
+  uint8_t *a = aligned_alloc(64,chunk*plane);
+  uint8_t *b = aligned_alloc(64,chunk*plane);
+  polx *tmp = aligned_alloc(64,chunk*sizeof(*tmp));
+  polx half[1];
+  polz hz = {0};
+  if(!a || !b || !tmp) abort();
+#if LOGQ > 64
+  polz_setcoeff_fromint128(&hz,(((__int128)1<<LOGQ)-QOFF+1)/2,0);
+#else
+  polz_setcoeff_fromint64(&hz,(int64_t)((((unsigned __int128)1<<LOGQ)-QOFF+1)/2),0);
+#endif
+  polz_topolx(half,&hz);
+  for(size_t start=0;start<len;start+=chunk) {
+    const size_t count = len-start < chunk ? len-start : chunk;
+    for(size_t i=0;i<count;i++) {
+      memcpy(a+i*plane,mat+(start+i)*JL_BYTES,plane);
+      memcpy(b+i*plane,mat+(start+i)*JL_BYTES+plane,plane);
+    }
+    polxvec_jlproj_sign_collapsmat(r+start,a,count,buf);
+    polxvec_jlproj_sign_collapsmat(tmp,b,count,buf);
+    for(size_t i=0;i<count;i++) {
+      polx_add(&r[start+i],&r[start+i],&tmp[i]);
+      polx_mul(&r[start+i],&r[start+i],half);
+      /* Division by two uses a full-width field element. Reduce the CRT
+         product before it is multiplied by another full-width coefficient. */
+      polx_refresh(&r[start+i]);
+    }
   }
+  free(a); free(b); free(tmp);
+}
 
-  return _mm512_hsum_epi64(s);
+#ifndef JLPROJ_BIN1_FUSED
+#define JLPROJ_BIN1_FUSED 1
+#endif
+
+void polxvec_jlproj_collapsmat(polx *r, const uint8_t *mat, size_t len,
+                              const uint8_t buf[256*QBYTES]) {
+#if LOGQ > 64 && JLPROJ_Q72_USE_AVX512 && JLPROJ_BIN1_FUSED
+  __int128 alpha[256];
+  _Alignas(64) int64_t low[256], high[256];
+  jl_expand_wide(alpha,buf);
+  for(size_t i=0;i<256;i++) {
+    low[i]=(uint64_t)alpha[i]&(((uint64_t)1<<48)-1);
+    high[i]=(int64_t)((alpha[i]-low[i])/((__int128)1<<48));
+  }
+  const size_t plane=256*N/8, blocks=(len+15)/16;
+#ifdef _OPENMP
+  const int threads=MIN(JLPROJ_Q64_MAX_THREADS,omp_get_max_threads());
+#pragma omp parallel for schedule(static) num_threads(threads) if(blocks>=16)
+#endif
+  for(size_t block=0;block<blocks;block++) {
+    const size_t count=MIN((size_t)16,len-16*block);
+    _Alignas(64) uint8_t packed[16*256*N/8];
+    _Alignas(64) int64_t rowlow[16*N]={0}, rowhigh[16*N]={0};
+    polz z[16];
+    for(size_t side=0;side<2;side++) {
+      for(size_t i=0;i<count;i++)
+        memcpy(packed+i*plane,mat+(16*block+i)*JL_BYTES+side*plane,plane);
+      for(size_t group=0;group<8;group++) {
+        const uint8_t *gmat=packed+32*16/8*group;
+        jlproj_collapsmat32(rowlow,gmat,count*N,&low[32*group]);
+        jlproj_collapsmat32(rowhigh,gmat,count*N,&high[32*group]);
+      }
+    }
+    /* Both sign planes have the same parity. Average their integer sums
+       before reducing mod q: one conversion replaces two NTTs, a full-width
+       multiplication by inverse(2), and a CRT refresh for every polynomial.
+       The low/high sums are below 2^57/2^33, respectively. */
+    for(size_t i=0;i<count*N;i++) {
+      const __int128 value=(__int128)rowlow[i]+(__int128)rowhigh[i]*((__int128)1<<48);
+      polz_setcoeff_fromint128(&z[i/N],jl_center_wide(value/2),i%N);
+    }
+    polzvec_sigmam1(z,z,count);
+    polzvec_topolxvec(r+16*block,z,count);
+  }
+#else
+  polxvec_jlproj_collapsmat_reference(r,mat,len,buf);
+#endif
+}
+
+unsigned __int128 jlproj_normsq_wide(const int32_t p[256]) {
+  unsigned __int128 sum=0;
+  for(size_t i=0;i<256;i++) {
+    const int64_t x=p[i];
+    sum+=(uint64_t)(x*x);
+  }
+  return sum;
+}
+
+uint64_t jlproj_normsq(const int32_t p[256]) {
+  const unsigned __int128 sum=jlproj_normsq_wide(p);
+  return sum>UINT64_MAX ? UINT64_MAX : (uint64_t)sum;
 }

@@ -114,6 +114,7 @@ typedef struct {
   size_t rbit_const_len;
   size_t proof_len;
   uint64_t outer_betasq;
+  int cr_external;
   uint8_t ar_seed[16];
   leopard_coeff *cr_coeffs;
   leopard_coeff *cx_coeffs;

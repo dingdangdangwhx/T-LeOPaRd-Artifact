@@ -8,7 +8,7 @@ HEXL_LIB := $(HEXL_BUILD)/hexl/lib/libhexl.a
 LAZER_SOURCES := $(wildcard src/lazer/*.c src/lazer/*.h)
 HEXL_SOURCES := $(shell find $(HEXL_DIR) third_party/cpu_features -type f)
 
-.PHONY: all lib-static benchmark check clean parameters proof-parameters
+.PHONY: all lib-static benchmark check clean parameters proof-parameters client-parameters
 all: lib-static
 	$(MAKE) -C src/protocol PROFILE=$(PROFILE) all
 
@@ -36,6 +36,14 @@ benchmark:
 check: lib-static
 	$(MAKE) -C src/protocol PROFILE=partial72 check
 	$(MAKE) -C src/protocol PROFILE=plain72 check
+	$(MAKE) -C src/protocol PROFILE=partial72 check-client
+	$(MAKE) -C src/protocol PROFILE=plain72 check-client
+
+client-parameters:
+	@mkdir -p results
+	python3 parameters/client_screen.py > results/client-screen.json
+	sage parameters/client_commitment.sage > results/client-commitment.json
+	sage parameters/client_challenge.sage > results/client-challenge.json
 
 parameters:
 	sage -python parameters/compute.py --kappa 32 --output results/parameters.json

@@ -30,6 +30,7 @@ int leopard_read_server_pre_state_file(const char *path, leopard_server_pre_stat
 
 int leopard_write_request_file(const char *path, const leopard_request_data *req);
 int leopard_read_request_file(const char *path, leopard_request_data *req);
+int leopard_request_attach_preprocessing(leopard_request_data *req, const leopard_preq_data *preq);
 
 int leopard_write_state_file(const char *path, const leopard_state_data *st);
 int leopard_read_state_file(const char *path, leopard_state_data *st);

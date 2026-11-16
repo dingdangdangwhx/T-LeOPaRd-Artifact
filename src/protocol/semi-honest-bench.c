@@ -1,4 +1,5 @@
 /* Proof-free protocol benchmark: shared client fast path and RNS arithmetic. */
+#define LEOPARD_PROOF_FREE 1
 #include "nizk1.c"
 #include "gaussian_lnp.h"
 #include "wire.h"

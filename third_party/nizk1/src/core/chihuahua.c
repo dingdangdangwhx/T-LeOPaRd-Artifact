@@ -5,6 +5,9 @@
 #include <math.h>
 #include <stdio.h>
 #include <time.h>
+#if defined(_OPENMP)
+#include <omp.h>
+#endif
 #include "malloc.h"
 #include "fips202.h"
 #include "aesctr.h"
@@ -18,6 +21,9 @@
 #include "chihuahua.h"
 #ifndef CHIHUAHUA_VERIFY_PROFILE
 #define CHIHUAHUA_VERIFY_PROFILE 0
+#endif
+#ifndef CHIHUAHUA_FUSED_COLLAPSE
+#define CHIHUAHUA_FUSED_COLLAPSE 1
 #endif
 
 static double chihuahua_elapsed_sec(const struct timespec *a, const struct timespec *b) {
@@ -202,6 +208,9 @@ static labrador_scalar centered_scalar_mul(labrador_scalar a, int64_t b) {
  * limbs and canonicalize after every Horner step instead. */
 static void polxvec_full_scalar_scale_add(polx *dst, const polx *src,
                                           size_t len, labrador_scalar scalar) {
+#if LOGQ == 72 && !defined(CHIHUAHUA_SCALAR_HORNER)
+  polxvec_scale_add_modq(dst,src,len,scalar);
+#else
   enum { LIMB_BITS = 22 };
   const int64_t base = (int64_t)1 << LIMB_BITS;
   int64_t digits[(LOGQ + LIMB_BITS - 1)/LIMB_BITS + 1];
@@ -229,6 +238,7 @@ static void polxvec_full_scalar_scale_add(polx *dst, const polx *src,
   polxvec_add(dst,dst,tmp,len);
   polxvec_refresh(dst,len);
   free(tmp);
+#endif
 }
 
 static void free_sparsecnst_array(sparsecnst *cnst, size_t k) {
@@ -494,6 +504,7 @@ void print_prncplstmnt_pp(const prncplstmnt *st) {
 
 void collaps_sparsecnst(constraint *ocnst, statement *ost, const proof *pi, const sparsecnst *icnst, size_t k) {
   size_t i,j,u,v;
+  size_t challenge_idx = 0;
   const size_t n = ost->n;
   labrador_scalar s;
   polx (*phi)[n];
@@ -509,10 +520,10 @@ void collaps_sparsecnst(constraint *ocnst, statement *ost, const proof *pi, cons
   shake128(hashbuf,sizeof(hashbuf),ost->h,16);
   memcpy(ost->h,hashbuf,16);
 
-  for(i=0;i<k;i++) {
+  for(i=0;i<k;i++,icnst++) {
     if(icnst->deg) continue;
 
-    s = bytes_to_centered_modq(&hashbuf[16+i*QBYTES]);
+    s = bytes_to_centered_modq(&hashbuf[16+challenge_idx++*QBYTES]);
 
     if(icnst->b)
       polxvec_full_scalar_scale_add(ocnst->b,icnst->b,1,s);
@@ -531,8 +542,115 @@ void collaps_sparsecnst(constraint *ocnst, statement *ost, const proof *pi, cons
     }
 
     sparsemat_scale_add_rankchunks(ocnst->a,icnst->a,pi,s);
-    icnst += 1;
   }
+}
+
+/*
+ * Check a single homogeneous equation directly, without a possibly zero scale.
+ * Preserve transcript evolution but avoid a redundant full-width scale.
+ */
+static void collaps_single_homogeneous_sparsecnst(
+    constraint *ocnst, statement *ost, const proof *pi,
+    const sparsecnst *icnst) {
+  uint8_t hashbuf[16+QBYTES];
+  const size_t n = ost->n;
+  size_t j, u, v;
+  polx (*phi)[n];
+
+  shake128(hashbuf,sizeof(hashbuf),ost->h,16);
+  memcpy(ost->h,hashbuf,16);
+  for(j=0;j<icnst->nz;j++) {
+    phi = (polx(*)[n])ocnst->phi;
+    u = v = 0;
+    while(u < icnst->idx[j]) {
+      phi += pi->nu[u];
+      v = pi->nu[u] ? 0 : v + pi->n[u];
+      u += 1;
+    }
+    polxvec_add(&(*phi)[v+icnst->off[j]],
+                &(*phi)[v+icnst->off[j]],
+                icnst->phi[j],icnst->len[j]);
+  }
+}
+
+
+static void reduce_phi_lanes(polx *phi, size_t len) {
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static) if(len >= 4096)
+#endif
+  for(size_t off=0;off<len;off+=256)
+    polxvec_reduce(&phi[off],MIN(256,len-off));
+}
+
+typedef struct {
+  size_t offset, len;
+  const polx *coeff;
+} aggregate_term;
+
+/* Partition by destination, not by constraint: overlapping contributions
+ * retain their original order, while independent output chunks run in parallel. */
+static int aggregate_degree_one(statement *ost, const proof *pi,
+                                const sparsecnst *cnst, size_t k,
+                                const uint8_t seed[16]) {
+  enum { BLOCK = 128 };
+  size_t count=0, t=0;
+  const size_t length=ost->r*ost->n, chunks=(length+BLOCK-1)/BLOCK;
+  if(length<4096) return 0;
+  for(size_t i=0;i<k;i++) {
+    if(cnst[i].deg==0) continue;
+    if(cnst[i].deg!=1) return 0;
+    for(size_t j=0;j<cnst[i].nz;j++)
+      if(cnst[i].mult[j]!=1) return 0;
+    count+=cnst[i].nz;
+  }
+  if(count<8) return 0;
+  aggregate_term *terms=_malloc(count*sizeof(*terms));
+  polx *factors=_aligned_alloc(64,count*sizeof(*factors));
+  size_t *offsets=_malloc((chunks+1)*sizeof(*offsets));
+  memset(offsets,0,(chunks+1)*sizeof(*offsets));
+  for(size_t i=0;i<k;i++) {
+    if(cnst[i].deg==0) continue;
+    polx alpha;
+    polxvec_quarternary(&alpha,1,seed,i);
+    if(cnst[i].b) polxvec_sprod_add(ost->cnst->b,&alpha,cnst[i].b,1);
+    for(size_t j=0;j<cnst[i].nz;j++,t++) {
+      size_t base=0, v=0;
+      for(size_t u=0;u<cnst[i].idx[j];u++) {
+        base+=pi->nu[u]*ost->n;
+        v=pi->nu[u] ? 0 : v+pi->n[u];
+      }
+      terms[t]=(aggregate_term){base+v+cnst[i].off[j],cnst[i].len[j],cnst[i].phi[j]};
+      const int64_t scale=sparsecnst_scale(&cnst[i],j);
+      if(scale==1) factors[t]=alpha;
+      else polx_scale(&factors[t],&alpha,scale);
+      if(terms[t].len)
+        for(size_t b=terms[t].offset/BLOCK;b<=(terms[t].offset+terms[t].len-1)/BLOCK;b++)
+          offsets[b+1]++;
+    }
+    sparsemat_polx_mul_add_rankchunks(ost->cnst->a,cnst[i].a,pi,&alpha);
+  }
+  for(size_t b=0;b<chunks;b++) offsets[b+1]+=offsets[b];
+  size_t *entries=_malloc(offsets[chunks]*sizeof(*entries));
+  size_t *cursor=_malloc(chunks*sizeof(*cursor));
+  memcpy(cursor,offsets,chunks*sizeof(*cursor));
+  for(t=0;t<count;t++)
+    if(terms[t].len)
+      for(size_t b=terms[t].offset/BLOCK;b<=(terms[t].offset+terms[t].len-1)/BLOCK;b++)
+        entries[cursor[b]++]=t;
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static)
+#endif
+  for(size_t b=0;b<chunks;b++) {
+    const size_t first=b*BLOCK, last=MIN(first+BLOCK,length);
+    for(size_t j=offsets[b];j<offsets[b+1];j++) {
+      const size_t id=entries[j];
+      const size_t lo=MAX(first,terms[id].offset), hi=MIN(last,terms[id].offset+terms[id].len);
+      polxvec_polx_mul_add(ost->cnst->phi+lo,factors+id,
+                          terms[id].coeff+lo-terms[id].offset,hi-lo);
+    }
+  }
+  free(cursor); free(entries); free(offsets); free(factors); free(terms);
+  return 1;
 }
 
 void aggregate_sparsecnst(statement *ost, const proof *pi, const sparsecnst *cnst, size_t k) {
@@ -543,8 +661,15 @@ void aggregate_sparsecnst(statement *ost, const proof *pi, const sparsecnst *cns
 
   shake128(hashbuf,32,ost->h,16);
   memcpy(ost->h,hashbuf,16);
+  reduce_phi_lanes(ost->cnst->phi,ost->r*ost->n);
+#ifndef CHIHUAHUA_SERIAL_AGGREGATE
+  if(aggregate_degree_one(ost,pi,cnst,k,&hashbuf[16])) {
+    ost->cnst->a->coeffs=realloc(ost->cnst->a->coeffs,ost->cnst->a->len*sizeof(polx));
+    return;
+  }
+#endif
 
-  for(i=0;i<k;i++) {
+  for(i=0;i<k;i++,cnst++) {
     if(cnst->deg == 0) continue;
     polx alpha[cnst->deg];
     polxvec_quarternary(alpha,cnst->deg,&hashbuf[16],i);
@@ -568,15 +693,32 @@ void aggregate_sparsecnst(statement *ost, const proof *pi, const sparsecnst *cns
         polxvec_scale(scaled_alpha,alpha,cnst->deg,scale);
         collapse_alpha = scaled_alpha;
       }
-      polxvec_collaps_add_extension(&(*phi)[v+cnst->off[j]],collapse_alpha,cnst->phi[j],cnst->len[j],
-                                    cnst->deg/cnst->mult[j],cnst->mult[j]);
+      if(CHIHUAHUA_FUSED_COLLAPSE && cnst->deg == 1 && cnst->mult[j] == 1) {
+        const size_t len = cnst->len[j];
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static) if(len >= 4096)
+#endif
+        for(size_t off=0;off<len;off+=256)
+          polxvec_polx_mul_add(&(*phi)[v+cnst->off[j]+off],collapse_alpha,
+                               &cnst->phi[j][off],MIN(256,len-off));
+      } else {
+        polxvec_collaps_add_extension(&(*phi)[v+cnst->off[j]],collapse_alpha,cnst->phi[j],cnst->len[j],
+                                      cnst->deg/cnst->mult[j],cnst->mult[j]);
+        /* Pointwise-add kernels leave unreduced signed 16-bit lanes. */
+        reduce_phi_lanes(&(*phi)[v+cnst->off[j]],cnst->len[j]);
+      }
     }
 
     sparsemat_polx_mul_add_rankchunks(ost->cnst->a,cnst->a,pi,alpha);
-    cnst += 1;
   }
 
   ost->cnst->a->coeffs = realloc(ost->cnst->a->coeffs,ost->cnst->a->len*sizeof(polx));
+}
+
+static int has_coefficient_constraint(const sparsecnst *cnst, size_t k) {
+  for(size_t i=0;i<k;i++)
+    if(cnst[i].deg == 0) return 1;
+  return 0;
 }
 
 int principle_prove(statement *ost, witness *owt, proof *pi, const prncplstmnt *ist, const witness *iwt, int tail) {
@@ -598,9 +740,9 @@ int principle_prove(statement *ost, witness *owt, proof *pi, const prncplstmnt *
   printf("Predicted witness norm: %.2f\n\n",sqrt(pi->normsq));
 
   {
-    buf = _aligned_alloc(64,ost->r*ost->n*(sizeof(polx)+256*N/8));
+    buf = _aligned_alloc(64,ost->r*ost->n*(sizeof(polx)+JL_BYTES));
     polx (*sx)[ost->n] = (polx(*)[ost->n])buf;
-    uint8_t (*jlmat)[ost->n][256*N/8] = (uint8_t(*)[ost->n][256*N/8])sx[ost->r];
+    uint8_t (*jlmat)[ost->n][JL_BYTES] = (uint8_t(*)[ost->n][JL_BYTES])sx[ost->r];
     clock_gettime(CLOCK_MONOTONIC,&t0);
     commit(ost,owt,pi,sx,iwt);
     clock_gettime(CLOCK_MONOTONIC,&t1);
@@ -625,8 +767,14 @@ int principle_prove(statement *ost, witness *owt, proof *pi, const prncplstmnt *
     for(i=0;i<LIFTS;i++) {
       clock_gettime(CLOCK_MONOTONIC,&t0);
       collaps_jlproj(cnst,ost,pi,jlmat);
-      if(postcommit_k) {
-        collaps_sparsecnst(cnst,ost,pi,postcommit,postcommit_k);
+      if(has_coefficient_constraint(postcommit,postcommit_k)) {
+        if(postcommit_k == 1 && postcommit[0].deg == 0 &&
+           postcommit[0].b == NULL && postcommit[0].a->len == 0 &&
+           postcommit[0].scale == NULL)
+          collaps_single_homogeneous_sparsecnst(
+              cnst,ost,pi,&postcommit[0]);
+        else
+          collaps_sparsecnst(cnst,ost,pi,postcommit,postcommit_k);
         refresh_sparsecnst_touched_phi(pi,cnst,postcommit,postcommit_k,ost->n);
       }
       collaps_sparsecnst(cnst,ost,pi,ist->cnst,ist->k);
@@ -639,7 +787,7 @@ int principle_prove(statement *ost, witness *owt, proof *pi, const prncplstmnt *
     }
     t_lift = t_lift_collapse + t_lift_eval;
     free_constraint(cnst);
-    if(postcommit_k) {
+    if(has_coefficient_constraint(postcommit,postcommit_k)) {
       polx_refresh(ost->cnst->b);
       polxvec_refresh(ost->cnst->phi,ost->r*ost->n);
       polxvec_refresh(ost->cnst->a->coeffs,ost->cnst->a->len);
@@ -647,6 +795,8 @@ int principle_prove(statement *ost, witness *owt, proof *pi, const prncplstmnt *
 
     clock_gettime(CLOCK_MONOTONIC,&t0);
     aggregate_sparsecnst(ost,pi,ist->cnst,ist->k);
+    if(postcommit_k)
+      aggregate_sparsecnst(ost,pi,postcommit,postcommit_k);
     clock_gettime(CLOCK_MONOTONIC,&t1);
     t_aggregate = chihuahua_elapsed_sec(&t0,&t1);
     clock_gettime(CLOCK_MONOTONIC,&t0);
@@ -680,7 +830,7 @@ err:
 int principle_reduce(statement *ost, const proof *pi, const prncplstmnt *ist) {
   size_t i;
   int ret;
-  uint8_t (*jlmat)[ost->n][256*N/8];
+  uint8_t (*jlmat)[ost->n][JL_BYTES];
   constraint cnst[1] = {};
   sparsecnst *postcommit = NULL;
   size_t postcommit_k = 0;
@@ -692,7 +842,7 @@ int principle_reduce(statement *ost, const proof *pi, const prncplstmnt *ist) {
 #endif
 
   init_statement(ost,pi,ist->h);
-  jlmat = _aligned_alloc(64,ost->r*ost->n*256*N/8);
+  jlmat = _aligned_alloc(64,ost->r*ost->n*JL_BYTES);
 
 #if CHIHUAHUA_VERIFY_PROFILE
   clock_gettime(CLOCK_MONOTONIC,&t0);
@@ -735,8 +885,14 @@ int principle_reduce(statement *ost, const proof *pi, const prncplstmnt *ist) {
     t_jl += chihuahua_elapsed_sec(&t0,&t1);
     clock_gettime(CLOCK_MONOTONIC,&t0);
 #endif
-    if(postcommit_k) {
-      collaps_sparsecnst(cnst,ost,pi,postcommit,postcommit_k);
+    if(has_coefficient_constraint(postcommit,postcommit_k)) {
+      if(postcommit_k == 1 && postcommit[0].deg == 0 &&
+         postcommit[0].b == NULL && postcommit[0].a->len == 0 &&
+         postcommit[0].scale == NULL)
+        collaps_single_homogeneous_sparsecnst(
+            cnst,ost,pi,&postcommit[0]);
+      else
+        collaps_sparsecnst(cnst,ost,pi,postcommit,postcommit_k);
       refresh_sparsecnst_touched_phi(pi,cnst,postcommit,postcommit_k,ost->n);
     }
     collaps_sparsecnst(cnst,ost,pi,ist->cnst,ist->k);
@@ -754,7 +910,7 @@ int principle_reduce(statement *ost, const proof *pi, const prncplstmnt *ist) {
   free_constraint(cnst);
   free(jlmat);
   jlmat = NULL;
-  if(postcommit_k) {
+  if(has_coefficient_constraint(postcommit,postcommit_k)) {
     polx_refresh(ost->cnst->b);
     polxvec_refresh(ost->cnst->phi,ost->r*ost->n);
     polxvec_refresh(ost->cnst->a->coeffs,ost->cnst->a->len);
@@ -764,6 +920,8 @@ int principle_reduce(statement *ost, const proof *pi, const prncplstmnt *ist) {
   clock_gettime(CLOCK_MONOTONIC,&t0);
 #endif
   aggregate_sparsecnst(ost,pi,ist->cnst,ist->k);
+  if(postcommit_k)
+    aggregate_sparsecnst(ost,pi,postcommit,postcommit_k);
 #if CHIHUAHUA_VERIFY_PROFILE
   clock_gettime(CLOCK_MONOTONIC,&t1);
   t_agg = chihuahua_elapsed_sec(&t0,&t1);
