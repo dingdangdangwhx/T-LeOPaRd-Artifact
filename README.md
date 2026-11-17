@@ -4,6 +4,8 @@ Artifact for **T-LeOPaRd: Efficient Threshold Oblivious PRFs from Lattices**.
 It contains parameter-selection scripts and C implementations with and without
 NIZKs, using 2-out-of-3 replicated sharing at correctness level kappa = 32.
 
+The anonymous [full version of the paper](paper/full-version.pdf) is included.
+
 | Setting | Partial modulus | Plain modulus |
 |---|---|---|
 | With NIZKs | 2^72 - 107 | 2^72 - 107 |
