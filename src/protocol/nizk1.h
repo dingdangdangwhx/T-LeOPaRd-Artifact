@@ -6,6 +6,9 @@
 
 #include "common.h"
 
+void leopard_client_epoch(const uint8_t seed[16], int prover);
+void leopard_output_context(const uint8_t pk[32], const uint8_t *secret);
+
 typedef struct leopard_nizk1_request leopard_nizk1_request;
 typedef struct leopard_nizk1_state leopard_nizk1_state;
 

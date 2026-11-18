@@ -502,6 +502,7 @@ static void absorb_outer_compact_statement(shake128incctx *st, const selector_ln
                                            const polx *tA, const polx *w, const polx *vlin,
                                            const polx *tq, const polx *vq, const polx *c) {
   absorb_bytes(st,"selector-outer-statement-compact",sizeof("selector-outer-statement-compact")-1);
+  if(ctx->epoch_bound) absorb_bytes(st,ctx->selector_chal_seed,16);
   absorb_u64(st,LOGQ);
   absorb_u64(st,ctx->Lchain);
   absorb_u64(st,GADGET_BASE);

@@ -12,7 +12,7 @@
 #error The maintained proof-free benchmark profiles use q56 or q64.
 #endif
 
-enum { SH_SLOTS = 10, SH_COMPONENTS = 3, SH_SERVERS = 3 };
+enum { SH_COMPONENTS = 3, SH_SERVERS = 3 };
 static const unsigned int holder_masks[SH_COMPONENTS] = {3,5,6};
 
 static double now_sec(void) {
@@ -135,12 +135,14 @@ static int run_once(size_t run, int report) {
   polx *keys=alloc_polxvec(3*m), *commitments=alloc_polxvec(3*(rank+2*m));
   polx *master=alloc_polxvec(m), *A=alloc_polxvec(rank*rank);
   polx *B=alloc_polxvec(2*m*rank), *r=alloc_polxvec(rank), *e=alloc_polxvec(rank+2*m);
-  polx *vk=alloc_polxvec(3*3*SH_SLOTS*rows), *es=alloc_polxvec(3*3*SH_SLOTS*rows);
+  polx *vk=alloc_polxvec(3*3*rows), *es=alloc_polxvec(3*3*rows);
   polx *ar=alloc_polxvec(m*rows), *ar_t=alloc_polxvec(m*rows);
   polx *cx=alloc_polxvec(m), *bx=alloc_polxvec(m), *mask=alloc_polxvec(rows);
   polx *key_sum=alloc_polxvec(m), *vsum=alloc_polxvec(rows), *esum=alloc_polxvec(rows);
   polx z[1], offset[1], eval_noise[1], eps[1], u[1], usum[1], epssum[1], tmp[1], exact[1];
-  double times[8]={0}, server_times[2]={0}, started;
+  double times[7]={0}, server_times[2]={0}, started;
+  /* State for the three test epochs, per server: 0 absent, 1 ready, 2 spent. */
+  unsigned char epoch_state[3][SH_SERVERS]={{0}};
   int rc=1;
 
   started=now_sec();
@@ -185,36 +187,42 @@ static int run_once(size_t run, int report) {
   shake128_inc_squeeze(pk_hash,sizeof(pk_hash),&hash);
   times[1]=now_sec()-started;
 
-  started=now_sec();
-  if(leopard_nizk1_preproc_client_data(&pre_public,&pre,&pp,SH_SLOTS)) goto cleanup;
-  times[2]=now_sec()-started;
-
-  started=now_sec();
-  for(size_t server=0;server<3;server++)
-    for(size_t j=0;j<SH_SLOTS;j++) {
-      leopard_public_almostuniform(ar,m*rows,pre.ar_seeds+16*j,NONCE_AR_BASE,leopard_public_threads());
+  for(size_t qi=0;qi<3;qi++) {
+    uint8_t epoch[8]={0}, material[sizeof("T-LeOPaRd-epoch-v1")-1+32+8], seed[16];
+    epoch[7]=(uint8_t)(1+qi);
+    memcpy(material,"T-LeOPaRd-epoch-v1",sizeof(material)-40);
+    memcpy(material+sizeof(material)-40,pk_hash,32);
+    memcpy(material+sizeof(material)-8,epoch,8);
+    started=now_sec();
+    for(size_t server=0;server<3;server++) {
+      if(epoch_state[qi][server] != 0) goto cleanup;
+      shake128(seed,16,material,sizeof(material));
+      leopard_public_almostuniform(ar,m*rows,seed,NONCE_AR_BASE,leopard_public_threads());
       canonical(ar,m*rows);
       for(size_t i=0;i<rows;i++)
         for(size_t k=0;k<m;k++) polxvec_copy(ar_t+i*m+k,ar+k*rows+i,1);
       for(size_t c=0;c<3;c++) if(holder_masks[c]&(1u<<server)) {
-        size_t index=((server*3+c)*SH_SLOTS+j)*rows;
+        size_t index=(server*3+c)*rows;
         gaussian_vector(es+index,rows,3,NULL);
         for(size_t k=0;k<rows;k++) full_sprod(vk+index+k,ar_t+k*m,keys+c*m,m);
         for(size_t i=0;i<rows;i++) polx_add(vk+index+i,vk+index+i,es+index+i);
         canonical(vk+index,rows);
       }
+      epoch_state[qi][server]=1;
     }
-  times[3]=now_sec()-started;
-
-  for(size_t qi=0;qi<3;qi++) {
-    size_t j=qi;
+    if(qi==0) times[2]=(now_sec()-started)/3;
     uint8_t finalized[32], evaluated[32], repeated[32];
     started=now_sec();
+    shake128(seed,16,material,sizeof(material));
+    leopard_client_epoch(seed,1);
+    leopard_pre_state_data_clear(&pre);
+    leopard_preq_data_clear(&pre_public);
+    if(leopard_nizk1_preproc_client_data(&pre_public,&pre,&pp,1)) goto cleanup;
     leopard_tag_hash(tag,tag_bytes,sizeof(tag_bytes)-1);
     leopard_expand_input_bits(bits,input);
-    if(leopard_fast_public_compute_preprocessed(&fast,&pre,j,tag,bits,NULL,cx)) goto cleanup;
+    if(leopard_fast_public_compute_preprocessed(&fast,&pre,0,tag,bits,NULL,cx)) goto cleanup;
     canonical(cx,m);
-    import_polx_coeffs(mask,pre.rhat_coeffs+j*rows*N,rows);
+    import_polx_coeffs(mask,pre.rhat_coeffs,rows);
     double request_time=now_sec()-started;
 
     polxvec_setzero(usum,1); polxvec_setzero(epssum,1);
@@ -222,6 +230,7 @@ static int run_once(size_t run, int report) {
     size_t active=0;
     for(size_t server=0;server<3;server++) if(quorums[qi]&(1u<<server)) {
       started=now_sec();
+      if(epoch_state[qi][server] != 1) goto cleanup;
       polxvec_setzero(key_sum,m);
       for(size_t c=0;c<3;c++) {
         unsigned int intersection=quorums[qi]&holder_masks[c];
@@ -236,6 +245,7 @@ static int run_once(size_t run, int report) {
       /* Coefficient export is the existing reply-encoding preparation. */
       leopard_coeff coeffs[N];
       export_polx_coeffs(coeffs,u,1);
+      epoch_state[qi][server]=2;
       double elapsed=now_sec()-started;
       if(qi==0) server_times[active]=elapsed;
       active++;
@@ -247,7 +257,7 @@ static int run_once(size_t run, int report) {
     for(size_t c=0;c<3;c++) {
       unsigned int intersection=quorums[qi]&holder_masks[c];
       unsigned int owner=31u-(unsigned int)__builtin_clz(intersection);
-      size_t index=((owner*3+c)*SH_SLOTS+j)*rows;
+      size_t index=(owner*3+c)*rows;
       for(size_t k=0;k<rows;k++) polx_add(vsum+k,vsum+k,vk+index+k);
     }
     polxvec_sprod(tmp,mask,vsum,rows);
@@ -272,7 +282,7 @@ static int run_once(size_t run, int report) {
     for(size_t c=0;c<3;c++) {
       unsigned int intersection=quorums[qi]&holder_masks[c];
       unsigned int owner=31u-(unsigned int)__builtin_clz(intersection);
-      size_t index=((owner*3+c)*SH_SLOTS+j)*rows;
+      size_t index=(owner*3+c)*rows;
       for(size_t k=0;k<rows;k++) polx_add(esum+k,esum+k,es+index+k);
     }
     polxvec_sprod(tmp,mask,esum,rows);
@@ -288,20 +298,20 @@ static int run_once(size_t run, int report) {
       goto cleanup;
     }
     if(qi==0) {
-      times[4]=request_time;
+      times[3]=request_time;
       measured_fast=fast;
-      times[5]=(server_times[0]+server_times[1])/2;
-      times[6]=finalize_time; times[7]=eval_time;
+      times[4]=(server_times[0]+server_times[1])/2;
+      times[5]=finalize_time; times[6]=eval_time;
     }
   }
   if(report) {
     printf("{\"run\":%zu,\"logq\":%d,\"m\":%zu,\"ell\":%zu,\"p\":%d,\"sigma_es\":12.4,\"sigma_online\":%.1f,\"correctness\":\"PASS\",\"quorums\":3,\"proofs_executed\":0,\"seconds\":[",
            run,LOGQ,m,ell,LEOPARD_ROUND_P,1.55*(1u<<SH_ONLINE_LOG));
-    for(size_t i=0;i<8;i++) printf("%s%.9f",i?",":"",times[i]);
-    printf("],\"request_breakdown\":[%.9f,%.9f,%.9f,%.9f,%.9f],\"bytes\":[48,%zu,%zu,%zu,%zu,%zu,0,0]}\n",
+    for(size_t i=0;i<7;i++) printf("%s%.9f",i?",":"",times[i]);
+    printf("],\"request_breakdown\":[%.9f,%.9f,%.9f,%.9f,%.9f],\"bytes\":[48,%zu,%zu,%zu,%zu,0,0]}\n",
            measured_fast.total_sec,measured_fast.selector_material_sec,measured_fast.slot_load_sec,measured_fast.chain_sec,measured_fast.cx_sec,
-           3*(rank+2*m)*N*QBYTES+32,SH_SLOTS*(pre.cr_rows*N*10/8+16),
-           3*2*SH_SLOTS*rows*N*QBYTES,m*N*QBYTES+24,(size_t)N*QBYTES+28);
+           3*(rank+2*m)*N*QBYTES+32,
+           2*rows*N*QBYTES+8,m*N*QBYTES+24+pre.cr_rows*N*10/8,(size_t)N*QBYTES+28);
     fflush(stdout);
   }
   rc=0;

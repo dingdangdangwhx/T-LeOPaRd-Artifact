@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include <limits.h>
+#include <sys/random.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -368,7 +369,9 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  if(strcmp(argv[1],"setup") == 0) {
+  const int epoch_request = !strcmp(argv[1],"epoch-request");
+  const int epoch_verify = !strcmp(argv[1],"epoch-verify");
+  if(!strcmp(argv[1],"epoch-setup") || !strcmp(argv[1],"setup")) {
     leopard_pp pp;
 
     if(argc != 3) {
@@ -392,6 +395,7 @@ int main(int argc, char **argv) {
         carry=sum>>8;
       }
     }
+    if(!strcmp(argv[1],"epoch-setup") && getrandom(&pp,sizeof(pp),0) != (ssize_t)sizeof(pp)) return 1;
     if(leopard_write_pp_file(argv[2],&pp) != 0)
       return 1;
     clock_gettime(CLOCK_MONOTONIC,&t1);
@@ -435,7 +439,7 @@ int main(int argc, char **argv) {
     return rc;
   }
 
-  if(strcmp(argv[1],"request") == 0) {
+  if(epoch_request || !strcmp(argv[1],"request")) {
     leopard_pp pp;
     leopard_pre_state_data pre_st = {0};
     leopard_request_data req = {0};
@@ -453,13 +457,21 @@ int main(int argc, char **argv) {
     nservers = (size_t)strtoull(argv[4],NULL,10);
     threshold = (size_t)strtoull(argv[5],NULL,10);
     if(leopard_read_pp_file(argv[2],&pp) != 0 ||
-       leopard_read_pre_state_file(argv[3],&pre_st) != 0 ||
+       (!epoch_request && leopard_read_pre_state_file(argv[3],&pre_st) != 0) ||
        leopard_parse_hex(tag,sizeof(tag),argv[7]) != 0 ||
        leopard_parse_hex(xbytes,sizeof(xbytes),argv[8]) != 0 ||
        leopard_parse_q_spec(argv[6],nservers,threshold,&q_mask) != 0) {
       return 1;
     }
     clock_gettime(CLOCK_MONOTONIC,&t0);
+    if(epoch_request) {
+      uint8_t seed[16];
+      leopard_preq_data scratch = {0};
+      if(leopard_parse_hex(seed,16,argv[3])) return 1;
+      leopard_client_epoch(seed,1);
+      if(leopard_nizk1_preproc_client_data(&scratch,&pre_st,&pp,1)) return 1;
+      leopard_preq_data_clear(&scratch);
+    }
     rc = leopard_nizk1_request_prove_preprocessed_data(&req,&st,&pre_st,&pp,
                                                        tag,sizeof(tag),xbytes);
     clock_gettime(CLOCK_MONOTONIC,&t1);
@@ -467,12 +479,12 @@ int main(int argc, char **argv) {
     req.nservers = nservers;
     req.threshold = threshold;
     req.q_mask = q_mask;
-    req.cr_external = getenv("LEOPARD_REQUEST_CACHED_PREPROC") &&
+    req.cr_external = !epoch_request && getenv("LEOPARD_REQUEST_CACHED_PREPROC") &&
                       strcmp(getenv("LEOPARD_REQUEST_CACHED_PREPROC"),"1") == 0;
     st.nservers = nservers;
     st.threshold = threshold;
     st.q_mask = q_mask;
-    if(rc == 0 &&
+    if(rc == 0 && !epoch_request &&
        leopard_nizk1_request_fast_public_preprocessed_data(&fast_prof,&pp,&pre_st,
                                                            req.slot_j,tag,sizeof(tag),
                                                            xbytes,&req) != 0) {
@@ -485,7 +497,7 @@ int main(int argc, char **argv) {
     if(rc == 0 &&
        leopard_write_request_file(argv[9],&req) == 0 &&
        leopard_write_state_file(argv[10],&st) == 0 &&
-       leopard_write_pre_state_file(argv[3],&pre_st) == 0) {
+       (epoch_request || leopard_write_pre_state_file(argv[3],&pre_st) == 0)) {
       const size_t req_file_bytes = file_size_bytes(argv[9]);
       const size_t req_public_bytes = req_file_bytes - req.proof_len;
       const size_t req_cx_bytes = packed_i64_wire_bytes(
@@ -500,6 +512,8 @@ int main(int argc, char **argv) {
       printf("req_cached_preprocessing=%d\n",req.cr_external);
       printf("req_cr_omitted_bytes=%zu\n",req.cr_external ?
           packed_i64_wire_bytes(req.cr_coeffs,req.cr_rows*LEOPARD_RING_DEG) : 0);
+      printf("req_cr_wire_bytes=%zu\n",req.cr_external ? 0 :
+          packed_i64_wire_bytes(req.cr_coeffs,req.cr_rows*LEOPARD_RING_DEG));
       printf("req_public_bytes=%zu\n",req_public_bytes);
       printf("req_public_cx_bytes=%zu\n",req_cx_bytes);
       printf("req_public_other_bytes=%zu\n",
@@ -547,7 +561,7 @@ int main(int argc, char **argv) {
     return rc;
   }
 
-  if(strcmp(argv[1],"verify-request") == 0) {
+  if(epoch_verify || !strcmp(argv[1],"verify-request")) {
     leopard_pp pp;
     leopard_request_data req = {0};
     leopard_preq_data cached = {0};
@@ -564,7 +578,12 @@ int main(int argc, char **argv) {
     }
     clock_gettime(CLOCK_MONOTONIC,&t0);
     /* Cache lookup is timed and never replaces the proof verification. */
-    if((req.cr_external && argc != 6) ||
+    if(epoch_verify) {
+      uint8_t seed[16];
+      if(argc != 6 || req.nservers != 3 || req.threshold != 2 || req.cr_external || req.slot_j ||
+         leopard_parse_hex(seed,16,argv[5]) || memcmp(req.ar_seed,seed,16)) return 1;
+      leopard_client_epoch(seed,0);
+    } else if((req.cr_external && argc != 6) ||
        (argc == 6 && (leopard_read_preq_file(argv[5],&cached) != 0 ||
                      leopard_request_attach_preprocessing(&req,&cached) != 0))) {
       leopard_preq_data_clear(&cached);
@@ -599,7 +618,19 @@ int main(int argc, char **argv) {
     return rc;
   }
 
-  if(strcmp(argv[1],"finalize") == 0) {
+  const int epoch_final=!strcmp(argv[1],"epoch-finalize");
+  const int epoch_eval=!strcmp(argv[1],"epoch-eval");
+  if(epoch_final || epoch_eval) {
+    uint8_t pk[32], secret[16];
+    if(argc!=(epoch_eval ? 8 : 6) || leopard_parse_hex(pk,32,argv[epoch_eval ? 6 : 5])) return 1;
+    if(epoch_eval) {
+      FILE *f=fopen(argv[7],"rb");
+      if(!f || fread(secret,1,16,f)!=16 || fgetc(f)!=EOF) return 1;
+      fclose(f);
+    }
+    leopard_output_context(pk,epoch_eval ? secret : NULL);
+  }
+  if(epoch_final || !strcmp(argv[1],"finalize")) {
     leopard_state_data st = {0};
     leopard_reply_data rep = {0};
     leopard_prep_data prep = {0};
@@ -616,7 +647,7 @@ int main(int argc, char **argv) {
     size_t component_total = 0;
     size_t i, li;
 
-    if(argc != 5) {
+    if(argc != (epoch_final ? 6 : 5)) {
       usage(argv[0]);
       return 1;
     }
@@ -760,7 +791,7 @@ finalize_cleanup:
   }
 
 
-  if(strcmp(argv[1],"eval") == 0) {
+  if(epoch_eval || !strcmp(argv[1],"eval")) {
     leopard_pp pp;
     uint8_t tag[LEOPARD_TAG_BYTES];
     uint8_t xbytes[LEOPARD_X_BYTES];
@@ -769,7 +800,7 @@ finalize_cleanup:
     leopard_coeff *k_coeffs = NULL;
     size_t k_rows = 0;
 
-    if(argc != 6) {
+    if(argc != (epoch_eval ? 8 : 6)) {
       usage(argv[0]);
       return 1;
     }

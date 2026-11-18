@@ -42,6 +42,31 @@ int labrador_latest_outer_main(int argc, char **argv);
 #include "client_outer.c"
 #undef main
 
+static _Thread_local uint8_t epoch_seed[16], output_pk[32], eval_secret[16];
+static _Thread_local int epoch_mode, epoch_prover, output_bound, eval_secret_set;
+
+void leopard_client_epoch(const uint8_t seed[16], int prover) {
+  epoch_mode = 1;
+  epoch_prover = prover;
+  memcpy(epoch_seed,seed,16);
+}
+
+void leopard_output_context(const uint8_t pk[32], const uint8_t *secret) {
+  memcpy(output_pk,pk,32);
+  output_bound = 1;
+  eval_secret_set = secret != NULL;
+  if(secret) memcpy(eval_secret,secret,16);
+}
+
+static void protocol_ctx_init(selector_lnp22_ctx *ctx, const uint8_t seed[16]) {
+  selector_ctx_init(ctx,seed);
+  if(epoch_mode) {
+    ctx->epoch_bound = 1;
+    memcpy(ctx->epoch_seed,epoch_seed,16);
+    if(epoch_prover) randombytes(ctx->private_seed,16);
+  }
+}
+
 struct leopard_nizk1_request {
   size_t selected_j;
   polx *cr;
@@ -113,6 +138,15 @@ static void *checked_malloc(size_t size, const char *what) {
 
 static void leopard_tag_hash(uint8_t out[LEOPARD_TAG_BYTES],
                              const uint8_t *tag, size_t tag_len) {
+  if(epoch_mode || output_bound) {
+    shake128incctx st;
+    shake128_inc_init(&st);
+    absorb_bytes(&st,"T-LeOPaRd-tag-v1",16);
+    absorb_bytes(&st,tag,tag_len);
+    shake128_inc_finalize(&st);
+    shake128_inc_squeeze(out,16,&st);
+    return;
+  }
   uint64_t s0 = 0x243f6a8885a308d3ULL;
   uint64_t s1 = 0x13198a2e03707344ULL;
   size_t i;
@@ -402,6 +436,50 @@ static int leopard_compute_bxt_fast(polx *bxt,
   return 0;
 }
 
+#if LOGQ == 72
+static void epoch_output(uint8_t y[32], const uint8_t tag[16], const uint8_t bits[80],
+                         const leopard_coeff z[N], int eval) {
+  uint8_t rounded[N], seed[16];
+  int64_t noise[N]={0};
+  shake128incctx h;
+  if(eval) {
+    if(!eval_secret_set) abort();
+    shake128_inc_init(&h);
+    absorb_bytes(&h,"T-LeOPaRd-ROE",13);
+    absorb_bytes(&h,eval_secret,16);
+    absorb_bytes(&h,tag,16);
+    absorb_bytes(&h,bits,80);
+    shake128_inc_finalize(&h);
+    shake128_inc_squeeze(seed,16,&h);
+    gaussian_lnp_i64(noise,N,seed,0,NIZK2_ESP_LOG2STDEV);
+  }
+  shake128_inc_init(&h);
+  absorb_bytes(&h,"T-LeOPaRd-ROpk",14);
+  absorb_bytes(&h,output_pk,32);
+  absorb_bytes(&h,tag,16);
+  absorb_bytes(&h,bits,80);
+  shake128_inc_finalize(&h);
+  for(size_t i=0;i<N;i++) {
+    leopard_ucoeff value;
+    do {
+      uint8_t bytes[LEOPARD_Q_BYTES];
+      shake128_inc_squeeze(bytes,sizeof(bytes),&h);
+      value=0;
+      for(size_t j=0;j<sizeof(bytes);j++) value|=(leopard_ucoeff)bytes[j]<<(8*j);
+    } while(value>=LEOPARD_MOD_Q);
+    rounded[i]=leopard_round_coeff_p(leopard_center_q_i128(z[i]+(__int128)value+noise[i]));
+  }
+  shake128_inc_init(&h);
+  absorb_bytes(&h,"T-LeOPaRd-ROz",13);
+  absorb_bytes(&h,tag,16);
+  absorb_bytes(&h,bits,80);
+  absorb_bytes(&h,rounded,sizeof(rounded));
+  absorb_bytes(&h,output_pk,32);
+  shake128_inc_finalize(&h);
+  shake128_inc_squeeze(y,32,&h);
+}
+#endif
+
 static void leopard_hash_output(uint8_t y[LEOPARD_OUTPUT_BYTES],
                                 const uint8_t tag_hash[LEOPARD_TAG_BYTES],
                                 const uint8_t xbits[LEOPARD_X_BITS],
@@ -478,6 +556,10 @@ static int leopard_finalize_output_binary_rhat(
     const leopard_coeff ux = leopard_center_q_i64(ux_coeffs[i]);
     z_coeffs[i] = leopard_center_q_i128((__int128)ux - acc[i]);
   }
+#if LOGQ == 72
+  if(output_bound) epoch_output(y,st->tag_hash,st->xbits,z_coeffs,0);
+  else
+#endif
   leopard_hash_output_coeffs(y,st->tag_hash,st->xbits,z_coeffs);
   return 0;
 }
@@ -2010,7 +2092,7 @@ static int leopard_prepare_selector_public_ctx_snow(
     size_t rbit_const_len,
     const uint8_t ar_seed[16], const polx *tA) {
 #if LNP22_DIRECT_CHAIN
-  selector_ctx_init(ctx,pp->nizk1_seed);
+  protocol_ctx_init(ctx,pp->nizk1_seed);
   memcpy(ctx->statement_seed,tag_hash,LEOPARD_TAG_BYTES);
   prepare_selector_lnp22_verifier_static(ctx);
   ctx->selected_j = slot_j;
@@ -2047,7 +2129,7 @@ static int leopard_prepare_selector_public_ctx_snow(
   uint64_t nonce = 0;
   size_t row, j, t;
 
-  selector_ctx_init(ctx,pp->nizk1_seed);
+  protocol_ctx_init(ctx,pp->nizk1_seed);
   memcpy(ctx->statement_seed,tag_hash,LEOPARD_TAG_BYTES);
   ctx->selected_j = slot_j;
 
@@ -2845,7 +2927,7 @@ static int leopard_finish_direct_inner_instance(outer_instance *inst) {
   witness_coeffs_to_i64(s1coeffs,&inst->ctx);
 
   sample_ternary_polxvec(inst->s2,inst->ctx.m2,
-                         inst->ctx.lnp_seed,NONCE_S2_BASE);
+                         inst->ctx.private_seed,NONCE_S2_BASE);
   polxvec_centered_to_i64(s2coeffs,inst->s2,inst->ctx.m2);
   compute_a3(inst->a3,&inst->ctx);
   inner_product_a3(inst->a3s2,inst->a3,inst->s2,inst->ctx.m2);
@@ -2853,9 +2935,9 @@ static int leopard_finish_direct_inner_instance(outer_instance *inst) {
   /* The first masks do not depend on tA. Reuse each generated A1 row for
    * both products, retaining the same mask nonces and folding order. */
   sample_gaussian_polxvec(inst->y1,inst->z1coeffs,inst->ctx.m1,
-                          LNP22_LOG2STDEV1,inst->ctx.lnp_seed,NONCE_Y1_BASE);
+                          LNP22_LOG2STDEV1,inst->ctx.private_seed,NONCE_Y1_BASE);
   sample_gaussian_polxvec(inst->y2,inst->z2coeffs,inst->ctx.m2,
-                          LNP22_LOG2STDEV2,inst->ctx.lnp_seed,NONCE_Y2_BASE);
+                          LNP22_LOG2STDEV2,inst->ctx.private_seed,NONCE_Y2_BASE);
   compute_tA_w_rows(inst->tA,inst->w,&inst->ctx,inst->ctx.s1,inst->s2,
                     inst->y1,inst->y2);
 #else
@@ -2893,11 +2975,11 @@ static int leopard_finish_direct_inner_instance(outer_instance *inst) {
 #endif
     sample_gaussian_polxvec(
         inst->y1,inst->z1coeffs,inst->ctx.m1,
-        LNP22_LOG2STDEV1,inst->ctx.lnp_seed,
+        LNP22_LOG2STDEV1,inst->ctx.private_seed,
         NONCE_Y1_BASE + inst->rejection_rounds);
     sample_gaussian_polxvec(
         inst->y2,inst->z2coeffs,inst->ctx.m2,
-        LNP22_LOG2STDEV2,inst->ctx.lnp_seed,
+        LNP22_LOG2STDEV2,inst->ctx.private_seed,
         NONCE_Y2_BASE + inst->rejection_rounds);
     compute_w_rows(inst->w,&inst->ctx,inst->y1,inst->y2);
 #if LEOPARD_DIRECT_COMBINE_TA_W
@@ -2925,12 +3007,12 @@ static int leopard_finish_direct_inner_instance(outer_instance *inst) {
       rej1 = reject_standard_polxvec(
           inst->z1coeffs,inst->cs1coeffs,inst->ctx.m1*N,
           sigma_from_log2stdev(LNP22_LOG2STDEV1),LNP22_GAMMA1,
-          inst->ctx.lnp_seed,
+          inst->ctx.private_seed,
           NONCE_Y1_BASE + 1000000 + inst->rejection_rounds);
       rej2 = reject_z2_polxvec(
           inst->z2coeffs,inst->cs2coeffs,inst->ctx.m2*N,
           sigma_from_log2stdev(LNP22_LOG2STDEV2),LNP22_GAMMA2,
-          inst->ctx.lnp_seed,
+          inst->ctx.private_seed,
           NONCE_Y2_BASE + 1000000 + inst->rejection_rounds);
     } else {
       rej1 = 0;
@@ -2986,7 +3068,7 @@ static int leopard_generate_request_instance_preprocessed(
   struct timespec prep0, prep1;
 
   memset(inst,0,sizeof(*inst));
-  selector_ctx_init(&inst->ctx,pp->nizk1_seed);
+  protocol_ctx_init(&inst->ctx,pp->nizk1_seed);
   g_last_request_profile.a1open_cache = inst->ctx.cache_a1open;
   if(pre->slot_count > inst->ctx.preproc_count)
     return 1;
@@ -4263,7 +4345,8 @@ static int leopard_nizk1_request_verify(const leopard_pp *pp,
 
   clock_gettime(CLOCK_MONOTONIC,&t0);
   fs_challenge(c_check,&ctx,req->tA,req->w,req->vlin,req->tq,req->vq);
-  derive_ar_seed_from_commitment(ar_seed,&ctx,req->cr);
+  if(epoch_mode) memcpy(ar_seed,epoch_seed,16);
+  else derive_ar_seed_from_commitment(ar_seed,&ctx,req->cr);
   clock_gettime(CLOCK_MONOTONIC,&t1);
   g_last_verify_profile.fs_seed_sec = leopard_elapsed_sec(&t0,&t1);
   if(memcmp(ar_seed,req->ar_seed,sizeof(ar_seed)) != 0)
@@ -4401,7 +4484,7 @@ int leopard_nizk1_preproc_client_data(leopard_preq_data *out_preq,
   selector_lnp22_ctx ctx;
   size_t max_slots;
 
-  selector_ctx_init(&ctx,pp->nizk1_seed);
+  protocol_ctx_init(&ctx,pp->nizk1_seed);
   max_slots = ctx.preproc_count;
   if(slot_count == 0 || slot_count > max_slots) {
     selector_ctx_clear(&ctx);
@@ -4543,6 +4626,13 @@ int leopard_nizk1_eval(uint8_t y[LEOPARD_OUTPUT_BYTES],
   }
   import_polx_coeffs(k,k_coeffs,k_rows);
   polxvec_sprod(z,bxt,k,k_rows);
+#if LOGQ == 72
+  if(output_bound) {
+    leopard_coeff coeffs[N];
+    export_polx_coeffs(coeffs,z,1);
+    epoch_output(y,tag_hash,xbits,coeffs,1);
+  } else
+#endif
   leopard_hash_output(y,tag_hash,xbits,z);
   free(k);
   free(bxt);

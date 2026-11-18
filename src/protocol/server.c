@@ -724,7 +724,15 @@ int main(int argc, char **argv) {
     return rc;
   }
 
-  if(strcmp(argv[1],"preproc-server") == 0) {
+#if LEOPARD_LOGQ == 72
+  if(!strcmp(argv[1],"epoch-limit") && argc == 2) {
+    printf("ok=1\nlimit=%d\n",NIZK2_ESP_LOG2STDEV == 18 ? 1024 : 4096);
+    return 0;
+  }
+#endif
+  int epoch_pre = !strcmp(argv[1],"epoch-preproc");
+  int epoch_blind = !strcmp(argv[1],"epoch-prove-reply");
+  if(epoch_pre || !strcmp(argv[1],"preproc-server")) {
     leopard_pp pp;
     leopard_sk_data sk = {0};
     leopard_preq_data preq = {0};
@@ -738,7 +746,7 @@ int main(int argc, char **argv) {
     char prep_path[PATH_MAX];
     char sps_path[PATH_MAX];
 
-    if(argc != 9) {
+    if(argc != (epoch_pre ? 10 : 9)) {
       usage(argv[0]);
       return 1;
     }
@@ -746,13 +754,21 @@ int main(int argc, char **argv) {
     threshold = (size_t)strtoull(argv[5],NULL,10);
     if(nservers == 0 || threshold == 0 || threshold > nservers || nservers > 63 ||
        leopard_read_pp_file(argv[2],&pp) != 0 ||
-       leopard_read_preq_file(argv[6],&preq) != 0 ||
+       (!epoch_pre && leopard_read_preq_file(argv[6],&preq) != 0) ||
        ensure_dir(argv[7]) != 0 ||
        ensure_dir(argv[8]) != 0) {
       return 1;
     }
     clock_gettime(CLOCK_MONOTONIC,&t0);
+    size_t party = epoch_pre ? strtoul(argv[9],NULL,10) : 0;
+    if(epoch_pre) {
+      if(party>=nservers) return 1;
+      preq.slot_count=1;
+      preq.ar_seeds=malloc(16);
+      if(!preq.ar_seeds || leopard_parse_hex(preq.ar_seeds,16,argv[6])) return 1;
+    }
     for(i=0;i<nservers;i++) {
+      if(epoch_pre && i!=party) continue;
       if(leopard_collect_local_masks(nservers,threshold,i,&local) != 0) {
         rc = 1;
         break;
@@ -808,7 +824,7 @@ int main(int argc, char **argv) {
     return rc;
   }
 
-  if(strcmp(argv[1],"blindeval") == 0) {
+  if(epoch_blind || !strcmp(argv[1],"blindeval")) {
     leopard_pp pp;
     leopard_request_data req = {0};
     leopard_mask_list local = {0};
@@ -826,7 +842,7 @@ int main(int argc, char **argv) {
     double prove_total = 0.0;
     double export_total = 0.0;
 
-    if(argc != 9) {
+    if(argc != (epoch_blind ? 10 : 9)) {
       usage(argv[0]);
       return 1;
     }
@@ -839,8 +855,10 @@ int main(int argc, char **argv) {
     }
     rc = 0;
     clock_gettime(CLOCK_MONOTONIC,&t0);
+    size_t party=epoch_blind ? strtoul(argv[9],NULL,10) : 0;
+    if(epoch_blind && (party>=req.nservers || !(req.q_mask & (UINT64_C(1)<<party)) || req.slot_j || req.cr_external)) return 1;
     for(i=0;i<req.nservers;i++) {
-      if(((req.q_mask >> i) & 1u) == 0)
+      if((epoch_blind && i!=party) || ((req.q_mask >> i) & 1u) == 0)
         continue;
       if(leopard_collect_local_masks(req.nservers,req.threshold,i,&local) != 0) {
         rc = 1;

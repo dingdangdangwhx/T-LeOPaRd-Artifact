@@ -86,6 +86,12 @@ endif
 threshold-client: client.c nizk1.c nizk1.h wire.c public_fastpath.h short_codec.h $(CORE) $(FRONTEND) $(COMMON_DEPS)
 	$(CC) $(CLIENT_FLAGS) client.c wire.c nizk1.c $(CORE) -o $@ -lm -fopenmp
 
+ifneq ($(filter $(PROFILE),partial72 plain72),)
+$(ROOT)/build/request-round-$(PROFILE): $(ROOT)/tests/request-round-fixture.c client.c nizk1.c nizk1.h wire.c public_fastpath.h short_codec.h $(CORE) $(FRONTEND) $(COMMON_DEPS)
+	@mkdir -p $(ROOT)/build
+	$(CC) $(CLIENT_FLAGS) $< wire.c nizk1.c $(CORE) -Wl,--wrap=randombytes -o $@ -lm -fopenmp
+endif
+
 threshold-server: server.c nizk2.c nizk2.h wire.c $(NIZK2)/server_proof.c \
 	$(NIZK2)/commitment_proof.h $(NIZK2)/params_double_$(PROFILE)_agg.h \
 	$(NIZK2)/profile_$(PROFILE).h $(ROOT)/liblazer.a $(COMMON_DEPS)

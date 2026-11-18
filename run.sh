@@ -32,8 +32,7 @@ export OMP_NUM_THREADS="$threads"
 export LEOPARD_PUBLIC_THREADS="${LEOPARD_PUBLIC_THREADS:-$threads}"
 export LEOPARD_PARALLEL_BLINDEVAL=0
 export LEOPARD_PARALLEL_VERIFY_REPLIES=1
-export LEOPARD_REQUEST_CACHED_PREPROC=1
-export NSERVERS=3 THRESHOLD=2 Q_SPEC=0,2 SLOTS=10
+unset LEOPARD_REQUEST_CACHED_PREPROC
 {
   uname -a
   lscpu
@@ -53,9 +52,10 @@ make -C "$root" -j"$jobs" JOBS="$jobs" lib-static > "$out/build_backend.log" 2>&
 for profile in partial72 plain72; do
   printf 'Running malicious %s (one warmup + %s measurements)...\n' "$profile" "$runs"
   make -C "$root/src/protocol" PROFILE="$profile" all > "$out/build_$profile.log" 2>&1
-  bash "$root/src/protocol/benchmark.sh" > "$out/${profile}_warmup.log" 2>&1
+  python3 "$root/tests/request-round.py" "$profile" --runs "$runs" --lock-fd 9 > "$out/${profile}_one_round.json"
+  python3 "$root/scripts/epoch.py" "$profile" --test > "$out/${profile}_warmup.json"
   for ((i=1; i<=runs; i++)); do
-    bash "$root/src/protocol/benchmark.sh" > "$out/${profile}_run$i.log" 2>&1
+    python3 "$root/scripts/epoch.py" "$profile" > "$out/${profile}_run$i.json"
   done
 done
 for profile in semi_partial56 semi_plain64; do

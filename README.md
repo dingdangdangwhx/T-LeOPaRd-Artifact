@@ -42,14 +42,34 @@ RUNS=5 OMP_NUM_THREADS=8 bash run.sh
 BlindEval is reported per server, with each server verifying the request
 independently; server proofs are generated sequentially. Finalize verifies the
 two replies in parallel within the total thread budget (two groups of four
-by default). Request communication counts one message and excludes the client
-commitment cached during preprocessing. Client preprocessing covers ten slots;
-server preprocessing time covers three servers and ten slots, while its
-communication is reported per server per slot, without reuse amortization.
-KB means 1024 bytes. The with-NIZK Eval timer measures PRF
-arithmetic; the semi-honest implementation includes secret-seeded evaluation noise.
+by default). PreProc measures one physical server publishing both component
+vectors for one epoch; it needs no client input. Request samples a fresh mask
+and sends its commitment online. Both settings include the public rounding
+offset and the secret-seeded direct evaluation noise. KB means 1024 bytes.
+For the two proof-enabled profiles the main Request row uses a fixed
+synthetic client request (seed offset 9, one rejection round); its time
+includes the client process, not seed search or deployment-state I/O.
+The report also gives the fresh-coin end-to-end Request time and rejection
+counts. Other proof-enabled online timings include CLI and state handling;
+semi-honest times are in-process.
 Communication is serialized-file size with NIZKs and packed-field accounting
 without NIZKs, excluding transport overhead.
+
+To repeat only the default one-round client measurement:
+
+```sh
+python3 tests/request-round.py partial72
+python3 tests/request-round.py plain72
+```
+
+The three published client timings per profile are in [the reference measurements](paper/client-request.csv).
+Both profiles replay offset 9; add `--start 0 --limit 64` to repeat the search.
+The fixture fixes the public inputs, mask and opening, then verifies the
+byte-identical replays with the normal verifier. Its request timer covers
+the client CLI rather than the deployment driver. These are conditional
+one-round timings, not fresh-coin averages. Only the fixture binary links
+test coins; it does not accept user inputs. `run.sh` measures it alongside
+the ordinary epoch protocol; it never sets the live prover to a fixed seed.
 
 ## Parameters
 
@@ -83,9 +103,12 @@ Commitment errors are affine residuals rather than separate witnesses, with
 the same joint opening L2 bound. Generated headers include the corresponding
 LNP22 parameters; sparse affine reconstruction and verification are optimized.
 
-The benchmark uses client fixture seed 2 (one rejection round) and fresh server
-coins. Other client seeds can require more rounds; these timings are not averages
-over fresh client randomness. This is research code, not a production service.
+The epoch driver uses fresh client and server coins without selecting rejection
+rounds. It enforces one publication per server and epoch, and limits responses
+to 1024 (Partial) or 4096 (Plain) uses per server in the proof-enabled profiles.
+The proof-free profiles use one use per server per epoch. The warmup checks
+all three quorums; negative tests additionally exercise the proof-enabled
+epoch boundary and rejection paths. This is research code, not a production service.
 The revised q72 proof/preprocessing format is not compatible with earlier files;
 regenerate them together. The semi-honest parameter sets are unchanged.
 

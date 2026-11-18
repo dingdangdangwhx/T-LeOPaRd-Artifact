@@ -354,7 +354,8 @@ typedef struct {
   uint8_t statement_seed[16];
   uint8_t selector_chal_seed[16];
   uint8_t rbit_const_seed[16];
-  uint8_t lnp_seed[16];
+  uint8_t lnp_seed[16], private_seed[16], epoch_seed[16];
+  int epoch_bound;
 } selector_lnp22_ctx;
 
 typedef struct {
@@ -1061,6 +1062,7 @@ static void selector_ctx_init(selector_lnp22_ctx *ctx, const uint8_t seed_in[16]
   ctx->cache_a1open = LNP22_CACHE_A1OPEN ? 1 : 0;
   memcpy(ctx->statement_seed,seed_in,16);
   memcpy(ctx->lnp_seed,seed_in,16);
+  memcpy(ctx->private_seed,seed_in,16); /* Legacy reproducibility fixture only. */
 
   for(i=0;i<LNP22_NUM_BLOCKS;i++) {
     ctx->witness[i] = alloc_polyvec(ctx->n[i]);
@@ -1404,13 +1406,13 @@ static void precompute_umc_commitments(selector_lnp22_ctx *ctx) {
     uint8_t *ar_seed = &ctx->pre_ar_seed[16*j];
 
     for(row=0;row<ctx->rhat_len;row++)
-      sample_binary_poly(&ctx->pre_rhat[j*ctx->rhat_len + row],ctx->lnp_seed,preproc_nonce(NONCE_RHAT_BASE,j,row));
+      sample_binary_poly(&ctx->pre_rhat[j*ctx->rhat_len + row],ctx->private_seed,preproc_nonce(NONCE_RHAT_BASE,j,row));
     for(row=0;row<ctx->umc_eua_len;row++)
-      (LEOPARD_PROOF_FREE ? sample_cbd1_poly : sample_binary_poly)(&ctx->pre_eua[j*ctx->umc_eua_len + row],ctx->lnp_seed,preproc_nonce(NONCE_UMC_EUA_BASE,j,row));
+      (LEOPARD_PROOF_FREE ? sample_cbd1_poly : sample_binary_poly)(&ctx->pre_eua[j*ctx->umc_eua_len + row],ctx->private_seed,preproc_nonce(NONCE_UMC_EUA_BASE,j,row));
     for(row=0;row<ctx->umc_eub_len;row++)
-      (LEOPARD_PROOF_FREE ? sample_cbd1_poly : sample_binary_poly)(&ctx->pre_eub[j*ctx->umc_eub_len + row],ctx->lnp_seed,preproc_nonce(NONCE_UMC_EUB_BASE,j,row));
+      (LEOPARD_PROOF_FREE ? sample_cbd1_poly : sample_binary_poly)(&ctx->pre_eub[j*ctx->umc_eub_len + row],ctx->private_seed,preproc_nonce(NONCE_UMC_EUB_BASE,j,row));
     for(row=0;row<ctx->umc_r_len;row++)
-      (LEOPARD_PROOF_FREE ? sample_cbd1_poly : sample_binary_poly)(&ctx->pre_r[j*ctx->umc_r_len + row],ctx->lnp_seed,preproc_nonce(NONCE_UMC_R_BASE,j,row));
+      (LEOPARD_PROOF_FREE ? sample_cbd1_poly : sample_binary_poly)(&ctx->pre_r[j*ctx->umc_r_len + row],ctx->private_seed,preproc_nonce(NONCE_UMC_R_BASE,j,row));
 
     polyvec_copy(ctx->witness[LNP22_RHAT_BLOCK],&ctx->pre_rhat[j*ctx->rhat_len],ctx->rhat_len);
     polyvec_copy(ctx->witness[LNP22_UMC_EUA_BLOCK],&ctx->pre_eua[j*ctx->umc_eua_len],ctx->umc_eua_len);
@@ -1422,7 +1424,8 @@ static void precompute_umc_commitments(selector_lnp22_ctx *ctx) {
     polyvec_copy(&ctx->pre_vb[j*ctx->umc_vb_len],ctx->witness[LNP22_UMC_VB_BLOCK],ctx->umc_vb_len);
     polxvec_copy(&ctx->pre_CX[j*ctx->cx_rows],ctx->CX,ctx->cx_rows);
     ctx->selected_j = j;
-    derive_ar_seed_from_commitment(ar_seed,ctx,&ctx->pre_CX[j*ctx->cx_rows]);
+    if(ctx->epoch_bound) memcpy(ar_seed,ctx->epoch_seed,16);
+    else derive_ar_seed_from_commitment(ar_seed,ctx,&ctx->pre_CX[j*ctx->cx_rows]);
   }
 }
 
@@ -1451,6 +1454,12 @@ static void derive_selector_chal_seed_from_public(selector_lnp22_ctx *ctx) {
 
   shake128_inc_init(&st);
   absorb_bytes(&st,"selector-nizk1-stmt",19);
+  if(ctx->epoch_bound) {
+    absorb_bytes(&st,"epoch-v1",8);
+    absorb_bytes(&st,ctx->epoch_seed,16);
+    absorb_bytes(&st,ctx->statement_seed,16);
+    absorb_bytes(&st,ctx->lnp_seed,16);
+  }
   absorb_u64(&st,LOGQ);
   absorb_u64(&st,ctx->Lchain);
   absorb_u64(&st,GADGET_BASE);
@@ -1495,11 +1504,11 @@ static int prepare_rbit_constcheck(selector_lnp22_ctx *ctx, const polx *s2) {
     return 1;
   for(size_t attempt=0;attempt<10000;attempt++) {
   sample_gaussian_polxvec(&ctx->rbit_const_g[RBIT_CONST_ROWS],yarp,
-                          RBIT_ARP_ROWS,RBIT_ARP_LOGSIGMA,ctx->lnp_seed,
+                          RBIT_ARP_ROWS,RBIT_ARP_LOGSIGMA,ctx->private_seed,
                           0x4152504d00000000ULL+attempt);
   for(row=0;row<ctx->rbit_const_lambda;row++) {
     if(row<RBIT_CONST_ROWS)
-      sample_zero_const_polx(&ctx->rbit_const_g[row],ctx->lnp_seed,
+      sample_zero_const_polx(&ctx->rbit_const_g[row],ctx->private_seed,
                              NONCE_RBIT_CONST_G_BASE + row);
     polxvec_sprod(&ctx->rbit_const_tg[row],
                   &ctx->rbit_const_Bg[row*ctx->m2],s2,ctx->m2);
@@ -1543,7 +1552,7 @@ static int prepare_rbit_constcheck(selector_lnp22_ctx *ctx, const polx *s2) {
   for(size_t i=0;i<RBIT_ARP_ROWS*N;i++) shift[i]=zarp[i]-yarp[i];
   if(validate_rbit_const_transcript(ctx) ||
      reject_standard_polxvec(zarp,shift,RBIT_ARP_ROWS*N,RBIT_ARP_SIGMA,10,
-                             ctx->lnp_seed,0x4152505200000000ULL+attempt))
+                             ctx->private_seed,0x4152505200000000ULL+attempt))
     continue;
   printf("  ARP mask rounds   = %zu\n",attempt+1);
   return 0;
