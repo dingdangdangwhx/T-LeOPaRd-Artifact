@@ -1,6 +1,8 @@
 CC ?= gcc
 CXX ?= g++
 CFLAGS ?= -O3 -march=native -mtune=native -Wall -Wextra
+LAZER_FLAGS = -fopenmp -DLAZER_AFFINE_GRAM_FAST=1 -DLAZER_AFFINE_GRAM_OPT=1 \
+	-DLAZER_AFFINE_NESTED=1 -DLAZER_AFFINE_FUSED=2
 PROFILE ?= partial72
 HEXL_DIR := third_party/hexl
 HEXL_BUILD := build/hexl
@@ -20,9 +22,9 @@ $(HEXL_LIB): $(HEXL_SOURCES)
 	  -DCMAKE_DISABLE_FIND_PACKAGE_CpuFeatures=ON -DCMAKE_INSTALL_LIBDIR=lib
 	cmake --build $(HEXL_BUILD) --target hexl --parallel $(or $(JOBS),4)
 
-build/lazer.o: $(LAZER_SOURCES) lazer.h config.h
+build/lazer.o: $(LAZER_SOURCES) lazer.h config.h Makefile
 	@mkdir -p build
-	$(CC) $(CFLAGS) -DNDEBUG -I. -Isrc/lazer -c src/lazer/lazer.c -o $@
+	$(CC) $(CFLAGS) $(LAZER_FLAGS) -DNDEBUG -I. -Isrc/lazer -c src/lazer/lazer.c -o $@
 
 build/hexl.o: src/lazer/hexl.cpp src/lazer/hexl.h $(HEXL_LIB)
 	$(CXX) $(CFLAGS) -DNDEBUG -Isrc/lazer -I$(HEXL_DIR)/hexl/include -c $< -o $@
@@ -34,6 +36,8 @@ benchmark:
 	bash run.sh
 
 check: lib-static
+	$(CC) $(CFLAGS) -fopenmp -I. tests/codec.c liblazer.a -lmpfr -lgmp -lm $(HEXL_LIB) -lstdc++ -o build/codec-check
+	./build/codec-check
 	$(MAKE) -C src/protocol PROFILE=partial72 check
 	$(MAKE) -C src/protocol PROFILE=plain72 check
 	$(MAKE) -C src/protocol PROFILE=partial72 check-client

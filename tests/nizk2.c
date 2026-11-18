@@ -80,6 +80,17 @@ int main(void) {
   CHECK(leopard_nizk2_keygen_data(&pk,&sk,&pp)==0);
   CHECK(sk.ei_rows==2*N && pk.ck_rows==COM_RANK+2*N);
   {
+    const leopard_coeff half=(leopard_coeff)((leopard_ucoeff)LEOPARD_MOD_Q/2);
+    const leopard_coeff target[]={half,-half,0,-1};
+    const leopard_coeff scale=(leopard_coeff)leopard_double_scale();
+    for(unsigned int h=0;h<4;h++) {
+      leopard_coeff delta=centered128((__int128)target[h]-sk.k_coeffs[h]);
+      sk.k_coeffs[h]=target[h];
+      pk.ck_coeffs[COM_RANK*D+h]=centered128((__int128)pk.ck_coeffs[COM_RANK*D+h]+delta);
+      pk.ck_coeffs[(COM_RANK+N)*D+h]=centered128((__int128)pk.ck_coeffs[(COM_RANK+N)*D+h]+(__int128)scale*delta);
+    }
+  }
+  {
     char path[]="/tmp/nizk2-double-pk-XXXXXX";
     int fd=mkstemp(path); CHECK(fd>=0); close(fd);
     leopard_pk_data copy={0};
@@ -121,6 +132,25 @@ int main(void) {
     size_t len=prover(proof,s,A,t,pp.nizk2_pp);
     printf("mult=%u prove=%.6f bytes=%zu\n",mult,get_sec()-start,len); fflush(stdout);
     CHECK(verifier(proof,A,t,pp.nizk2_pp)==1);
+    if(mult==1 && getenv("NIZK2_L2_NEGATIVE_TESTS")) {
+      const unsigned int badrows[]={0,COM_RANK,2*COM_RANK,2*COM_RANK+N};
+      polyvec_t saved_t; polyvec_alloc(saved_t,ring,REL_ROWS); polyvec_set(saved_t,t);
+      for(unsigned int j=0;j<4;j++) {
+        poly_ptr x=polyvec_get_elem(s,badrows[j]);
+        poly_fromcrt(x); poly_mod(x,x); poly_redc(x,x);
+        INT_T(saved,ring->q->nlimbs); int_set(saved,poly_get_coeff(x,0));
+        int_set_i64(poly_get_coeff(x,0),256);
+        polyvec_mul(t,A,s); polyvec_neg_self(t); polyvec_mod(t,t); polyvec_redc(t,t);
+        size_t badlen=prover(proof,s,A,t,pp.nizk2_pp);
+        CHECK(badlen>0 && verifier(proof,A,t,pp.nizk2_pp)==0);
+        poly_fromcrt(x); int_set(poly_get_coeff(x,0),saved);
+        polyvec_set(t,saved_t);
+      }
+      polyvec_free(saved_t);
+      len=prover(proof,s,A,t,pp.nizk2_pp);
+      CHECK(verifier(proof,A,t,pp.nizk2_pp)==1);
+      puts("L2 opening: excessive r/e_A/e_0/e_1 norm with valid algebra REJECTED");
+    }
     const unsigned int rows[]={0,COM_RANK,COM_RANK+N,COM_ROWS,REL_ROWS-1};
     for(unsigned int j=0;j<sizeof(rows)/sizeof(rows[0]);j++) {
       poly_ptr v=polyvec_get_elem(t,rows[j]);

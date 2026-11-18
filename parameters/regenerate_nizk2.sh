@@ -5,6 +5,6 @@ cd "$root/parameters"
 for profile in partial72 plain72; do
   target="$root/third_party/nizk2/params_double_${profile}_agg.h"
   trap 'rm -f "$target.tmp"' EXIT
-  sage nizk2-params-codegen.sage "${target%.h}.py" > "$target.tmp"
+  sage server_params.sage "$profile" > "$target.tmp"
   mv "$target.tmp" "$target"
 done

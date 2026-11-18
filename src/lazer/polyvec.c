@@ -181,9 +181,16 @@ polyvec_mul (polyvec_t r, polymat_t a, polyvec_t b)
   }
 }
 
+#if defined(LAZER_AFFINE_GRAM_OPT) && LAZER_AFFINE_GRAM_OPT
+#include "mulsparse.h"
+#endif
+
 void
 polyvec_mulsparse (polyvec_t r, spolymat_t a, polyvec_t b)
 {
+#if defined(LAZER_AFFINE_GRAM_OPT) && LAZER_AFFINE_GRAM_OPT
+  if(affine_sparse_matvec(r,a,b)) return;
+#endif
   poly_ptr rp, ap, bp;
   unsigned int i, row, col;
 

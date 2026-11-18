@@ -569,7 +569,11 @@ _lnp_prover_set_witness_upsilon (lnp_prover_state_t state)
         polyvec_set_zero (subv);
 
       if (Em_ != NULL)
+#if defined(LAZER_AFFINE_GRAM_OPT) && LAZER_AFFINE_GRAM_OPT
+        __lnp_public_addmul (subv, Em_, m_);
+#else
         polyvec_addmul (subv, Em_, m_, 0);
+#endif
 
       if (Es_ != NULL)
         {

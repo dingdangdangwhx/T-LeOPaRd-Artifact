@@ -8,6 +8,9 @@
 
 #include <stdlib.h>
 #include <string.h>
+#if defined(LAZER_AFFINE_GRAM_OPT) && LAZER_AFFINE_GRAM_OPT
+#include "sparse.h"
+#endif
 
 static int
 _cmp_polymat (const void *a_, const void *b_)
@@ -66,6 +69,9 @@ spolymat_alloc (spolymat_ptr r, const polyring_t ring, unsigned int nrows,
 void
 spolymat_set (spolymat_ptr r, spolymat_ptr a)
 {
+#if defined(LAZER_AFFINE_GRAM_OPT) && LAZER_AFFINE_GRAM_OPT
+  if(affine_sparse_apply(r,a,NULL,0,0)) return;
+#endif
   poly_ptr poly, poly2;
   unsigned int i, row, col;
 
@@ -94,7 +100,10 @@ spolymat_redc (spolymat_ptr r)
 {
   unsigned int i;
 
-  _SMAT_FOREACH_ELEM (r, i) { poly_redc (r->elems[i].poly, r->elems[i].poly); }
+#if defined(LAZER_AFFINE_FUSED) && LAZER_AFFINE_FUSED && defined(_OPENMP)
+#pragma omp parallel for schedule(static) if(r->nelems>=256 && nizk2_parallel_allowed())
+#endif
+  for(i=0;i<r->nelems;i++) { poly_redc (r->elems[i].poly, r->elems[i].poly); }
 }
 
 void
@@ -102,7 +111,10 @@ spolymat_redp (spolymat_ptr r)
 {
   unsigned int i;
 
-  _SMAT_FOREACH_ELEM (r, i) { poly_redp (r->elems[i].poly, r->elems[i].poly); }
+#if defined(LAZER_AFFINE_FUSED) && LAZER_AFFINE_FUSED && defined(_OPENMP)
+#pragma omp parallel for schedule(static) if(r->nelems>=256 && nizk2_parallel_allowed())
+#endif
+  for(i=0;i<r->nelems;i++) { poly_redp (r->elems[i].poly, r->elems[i].poly); }
 }
 
 int
@@ -125,6 +137,9 @@ spolymat_is_upperdiag (spolymat_ptr r)
 void
 spolymat_add (spolymat_t r, spolymat_t a, spolymat_t b, int crt)
 {
+#if defined(LAZER_AFFINE_GRAM_OPT) && LAZER_AFFINE_GRAM_OPT
+  if(affine_sparse_add(r,a,b,crt)) return;
+#endif
   poly_ptr pr, pa, pb;
   unsigned int arow, acol, brow, bcol;
   unsigned int i = 0, j = 0, k = 0;
@@ -204,7 +219,10 @@ spolymat_fromcrt (spolymat_t r)
   unsigned int i;
   poly_ptr ri;
 
-  _SMAT_FOREACH_ELEM (r, i)
+#if defined(LAZER_AFFINE_GRAM_OPT) && LAZER_AFFINE_GRAM_OPT && defined(_OPENMP)
+#pragma omp parallel for schedule(static) private(ri) if(r->nelems>=256 && nizk2_parallel_allowed())
+#endif
+  for(i=0;i<r->nelems;i++)
   {
     ri = spolymat_get_elem (r, i);
     poly_fromcrt (ri);
@@ -215,6 +233,9 @@ spolymat_fromcrt (spolymat_t r)
 void
 spolymat_lrot (spolymat_t r, spolymat_t b, unsigned int n)
 {
+#if defined(LAZER_AFFINE_GRAM_OPT) && LAZER_AFFINE_GRAM_OPT
+  if(affine_sparse_apply(r,b,NULL,n,3)) return;
+#endif
   poly_ptr ri, bi;
   unsigned int brow, bcol, i;
 
@@ -238,6 +259,9 @@ spolymat_lrot (spolymat_t r, spolymat_t b, unsigned int n)
 void
 spolymat_mod (spolymat_ptr r, spolymat_ptr b)
 {
+#if defined(LAZER_AFFINE_GRAM_OPT) && LAZER_AFFINE_GRAM_OPT
+  if(affine_sparse_apply(r,b,NULL,0,1)) return;
+#endif
   poly_ptr ri, bi;
   unsigned int brow, bcol, i;
 
@@ -261,6 +285,9 @@ spolymat_mod (spolymat_ptr r, spolymat_ptr b)
 void
 spolymat_scale (spolymat_t r, const int_t a, spolymat_t b)
 {
+#if defined(LAZER_AFFINE_GRAM_OPT) && LAZER_AFFINE_GRAM_OPT
+  if(affine_sparse_apply(r,b,a,0,2)) return;
+#endif
   poly_ptr ri, bi;
   unsigned int brow, bcol, i;
 
@@ -284,6 +311,9 @@ spolymat_scale (spolymat_t r, const int_t a, spolymat_t b)
 void
 spolymat_scale2 (spolymat_t r, poly_t a, spolymat_t b)
 {
+#if defined(LAZER_AFFINE_GRAM_OPT) && LAZER_AFFINE_GRAM_OPT
+  if(affine_sparse_scale2(r,a,b)) return;
+#endif
   poly_ptr ri, bi;
   unsigned int brow, bcol, i;
 

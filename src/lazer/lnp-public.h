@@ -4,6 +4,12 @@
 #include "lazer.h"
 #include "memory.h"
 #include "brandom.h"
+#if defined(LAZER_AFFINE_GRAM_OPT) && LAZER_AFFINE_GRAM_OPT
+#include "threading.h"
+#endif
+#if defined(LAZER_AFFINE_GRAM_OPT) && LAZER_AFFINE_GRAM_OPT && defined(_OPENMP)
+#include <omp.h>
+#endif
 
 #ifndef LAZER_SZ_SPLIT_ACCUM
 #define LAZER_SZ_SPLIT_ACCUM 1
@@ -82,6 +88,45 @@ __lnp_public_leftmul (polymat_t out, polymat_t left, polymat_t matrix)
 static void
 __lnp_public_leftvec (polyvec_t out, polyvec_t left, polymat_t matrix)
 {
+#if defined(LAZER_AFFINE_GRAM_OPT) && LAZER_AFFINE_GRAM_OPT
+  if(getenv("LNP_DISABLE_AFFINE_PRODUCTS") == NULL) {
+    unsigned int nr=matrix->nrows, nc=matrix->ncols;
+    poly_ptr *entries=calloc(nr*nc,sizeof(*entries));
+    if(!entries) abort();
+    for(unsigned int j=0;j<nc;j++) for(unsigned int i=0;i<nr;i++) {
+      poly_ptr x=polymat_get_elem(matrix,i,j);
+      /* A cached CRT entry may be multiplied even if it represents zero.
+       * Avoid an inverse transform just to skip that optional operation. */
+      if(x->crt || !__lnp_public_poly_is_zero(x)) entries[j*nr+i]=x;
+    }
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if(nr*nc>=4096 && nizk2_parallel_allowed())
+#endif
+    for(unsigned int j=0;j<nc;j++) for(unsigned int i=0;i<nr;i++)
+      if(entries[j*nr+i]) _tocrt(entries[j*nr+i]);
+    for(unsigned int i=0;i<nr;i++) _tocrt(polyvec_get_elem(left,i));
+    polyvec_set_zero(out);
+#ifdef _OPENMP
+#pragma omp parallel if(nc>=32 && nizk2_parallel_allowed())
+#endif
+    {
+      poly_t product; poly_alloc(product,matrix->ring);
+#ifdef _OPENMP
+#pragma omp for schedule(static)
+#endif
+      for(unsigned int j=0;j<nc;j++) {
+        poly_ptr dst=polyvec_get_elem(out,j);
+        for(unsigned int i=0;i<nr;i++) if(entries[j*nr+i]) {
+          poly_mul(product,polyvec_get_elem(left,i),entries[j*nr+i]);
+          poly_add(dst,dst,product,1);
+        }
+      }
+      poly_free(product);
+    }
+    free(entries);
+    return;
+  }
+#endif
   poly_t product;
   poly_alloc (product, matrix->ring);
   polyvec_set_zero (out);
@@ -101,6 +146,9 @@ __lnp_public_leftvec (polyvec_t out, polyvec_t left, polymat_t matrix)
 static void
 __lnp_public_auto (polymat_t out, polymat_t matrix)
 {
+#if defined(LAZER_AFFINE_GRAM_OPT) && LAZER_AFFINE_GRAM_OPT && defined(_OPENMP)
+#pragma omp parallel for schedule(static) if(matrix->nrows*matrix->ncols>=4096 && nizk2_parallel_allowed())
+#endif
   for (unsigned int i = 0; i < matrix->nrows; i++)
     for (unsigned int j = 0; j < matrix->ncols; j++)
       {

@@ -50,6 +50,8 @@ def malicious_run(path):
         result["seconds"][name] = field(timing, "F." + name) / (2 if name == "BlindEval" else 1)
         message_bytes = field(comm, byte_names[name]) if byte_names[name] else 0
         result["bytes"][name] = message_bytes / (2 if name == "BlindEval" else 1)
+    result["preproc_server_total_bytes"] = result["bytes"]["PreProcServer"]
+    result["bytes"]["PreProcServer"] /= 3 * 10
     result["request_seconds"] = {key: field(req, key) for key in (
         "protocol total", "NIZK total", "inner instance", "inner prepare",
         "inner prove", "outer witness", "outer statement", "outer prove", "serialize proof")}
@@ -81,10 +83,16 @@ def semi_runs(path, expected):
             raise ValueError("incomplete proof-free measurements")
         if any(not math.isfinite(x) or x < 0 for x in row["seconds"] + row["bytes"]):
             raise ValueError("invalid proof-free measurement")
-    return [{"correctness": "PASS", "seconds": dict(zip(ALGORITHMS, row["seconds"])),
-             "bytes": dict(zip(ALGORITHMS, row["bytes"])),
-             "request_seconds": dict(zip(("fast core", "selector matrices", "load slot", "chain", "Cx"),
-                                          row["request_breakdown"]))} for row in rows]
+    results = []
+    for row in rows:
+        message_bytes = dict(zip(ALGORITHMS, row["bytes"]))
+        total = message_bytes["PreProcServer"]
+        message_bytes["PreProcServer"] /= 3 * 10
+        results.append({"correctness": "PASS", "seconds": dict(zip(ALGORITHMS, row["seconds"])),
+                        "bytes": message_bytes, "preproc_server_total_bytes": total,
+                        "request_seconds": dict(zip(("fast core", "selector matrices", "load slot", "chain", "Cx"),
+                                                     row["request_breakdown"]))})
+    return results
 
 
 def aggregate(rows):
@@ -114,8 +122,10 @@ def main():
                           "mean": aggregate(rows), "runs": rows}
 
     scope = ("BlindEval: per-server mean, independent request verification, sequential server proofs. "
-             "Finalize: client-side parallel verification. Request: one message. "
-             "PreProcClient: 10 instances. PreProcServer: 3 servers x 10 instances. "
+             "Finalize: client-side parallel verification within the total thread budget. "
+             "Request: one message, excluding the cached preprocessing commitment. "
+             "PreProcClient: 10 slots. PreProcServer: time for 3 servers x 10 slots; "
+             "communication per server per slot, without reuse amortization. "
              "With-NIZK Eval: PRF arithmetic only. KB: 1024 bytes; communication excludes transport overhead.")
     summary = {"runs": count, "warmups": 1, "scope": scope, "profiles": profiles}
     (root / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")

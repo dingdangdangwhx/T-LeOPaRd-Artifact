@@ -309,7 +309,7 @@ coder_dec_grandom (coder_state_t state, intvec_t v, unsigned int log2o)
         _inc_idx (&nbytes, &_bit);
       }
 
-    if ((z0 & (1 << (log2ao - 1))) > 0)
+    if ((z0 & ((unsigned long)1 << (log2ao - 1))) != 0)
       z0 |= (((unsigned long)~0) << log2ao); /* sign-extend */
 
     z = ao * z1 + z0;

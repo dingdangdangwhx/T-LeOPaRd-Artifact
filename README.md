@@ -41,9 +41,12 @@ RUNS=5 OMP_NUM_THREADS=8 bash run.sh
 
 BlindEval is reported per server, with each server verifying the request
 independently; server proofs are generated sequentially. Finalize verifies the
-two replies in parallel. Request communication counts one message. Preprocessing
-covers ten instances, and server preprocessing covers all three servers without
-reuse amortization. KB means 1024 bytes. The with-NIZK Eval timer measures PRF
+two replies in parallel within the total thread budget (two groups of four
+by default). Request communication counts one message and excludes the client
+commitment cached during preprocessing. Client preprocessing covers ten slots;
+server preprocessing time covers three servers and ten slots, while its
+communication is reported per server per slot, without reuse amortization.
+KB means 1024 bytes. The with-NIZK Eval timer measures PRF
 arithmetic; the semi-honest implementation includes secret-seeded evaluation noise.
 Communication is serialized-file size with NIZKs and packed-field accounting
 without NIZKs, excluding transport overhead.
@@ -74,6 +77,11 @@ commitment, lifting/no-wrap inequalities, and ideal challenge filter.
 These screens are not a certificate for the composed proof system: the complete
 recursive extraction, simulation, and concrete Fiat--Shamir loss analysis remain
 separate proof obligations.
+
+The server proof retains uniform key shares in its unbounded message block.
+Commitment errors are affine residuals rather than separate witnesses, with
+the same joint opening L2 bound. Generated headers include the corresponding
+LNP22 parameters; sparse affine reconstruction and verification are optimized.
 
 The benchmark uses client fixture seed 2 (one rejection round) and fresh server
 coins. Other client seeds can require more rounds; these timings are not averages

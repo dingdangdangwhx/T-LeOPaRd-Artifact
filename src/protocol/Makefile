@@ -60,7 +60,8 @@ SERVER_FLAGS = $(COMMON_FLAGS) -DNIZK2_M=$(ELL) -DNIZK2_N=$(M) \
 	-DNIZK2_PARAMS_HEADER=\"params_double_$(PROFILE)_agg.h\" \
 	-DNIZK2_LEGACY_I64_INSTANCE=0 -DNIZK2_CHECK_LINEAR_RELATION=0 \
 	-DNIZK2_AGGREGATE_MAX=2 -DLEOPARD_PARALLEL_BLINDEVAL=0 \
-	-DLEOPARD_PARALLEL_VERIFY_REPLIES=1
+	-DLEOPARD_PARALLEL_VERIFY_REPLIES=1 -DLEOPARD_VERIFY_BUDGETED_THREADS=1 \
+	-DLAZER_AFFINE_NESTED=1
 SERVER_LIBS = $(ROOT)/liblazer.a -lmpfr -lgmp -lm \
 	$(ROOT)/build/hexl/hexl/lib/libhexl.a -lstdc++ -fopenmp
 CORE = $(addprefix $(NIZK1)/src/core/,pack.c greyhound.c dachshund.c \
@@ -112,7 +113,7 @@ nizk2-check: $(ROOT)/tests/nizk2.c nizk2.c nizk2.h wire.c \
 	$(CC) $(SERVER_FLAGS) $(ROOT)/tests/nizk2.c wire.c $(NIZK1)/src/core/aesctr.c -o $@ $(SERVER_LIBS)
 
 check: nizk2-check
-	./nizk2-check
+	NIZK2_L2_NEGATIVE_TESTS=1 ./nizk2-check
 
 clean:
 	rm -f threshold-client threshold-server semi-honest-bench nizk1-check nizk2-check arithmetic-check .build-config .build-config.tmp

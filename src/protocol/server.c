@@ -1023,12 +1023,24 @@ int main(int argc, char **argv) {
     }
 
     if(rc == 0) {
-#if defined(_OPENMP) && LEOPARD_PARALLEL_VERIFY_REPLIES
+#if defined(_OPENMP) && LEOPARD_PARALLEL_VERIFY_REPLIES && defined(LEOPARD_VERIFY_BUDGETED_THREADS) && LEOPARD_VERIFY_BUDGETED_THREADS
+      const int saved_threads = omp_get_max_threads();
+      const int saved_levels = omp_get_max_active_levels();
+      const int saved_dynamic = omp_get_dynamic();
+      const int outer_threads = jobs.count < (size_t)saved_threads
+                                ? (jobs.count ? (int)jobs.count : 1) : saved_threads;
+      const int inner_threads = saved_threads / outer_threads;
+      omp_set_dynamic(0);
+      omp_set_max_active_levels(2);
+#pragma omp parallel for schedule(static) num_threads(outer_threads) if(outer_threads > 1)
+#elif defined(_OPENMP) && LEOPARD_PARALLEL_VERIFY_REPLIES
 #pragma omp parallel for schedule(dynamic) if(jobs.count > 1)
 #endif
       for(ji=0;ji<jobs.count;ji++) {
         leopard_blindeval_job *job = &jobs.jobs[ji];
-
+#if defined(_OPENMP) && LEOPARD_PARALLEL_VERIFY_REPLIES && defined(LEOPARD_VERIFY_BUDGETED_THREADS) && LEOPARD_VERIFY_BUDGETED_THREADS
+        omp_set_num_threads(inner_threads);
+#endif
         job->rc = leopard_verify_reply_bundle(&pp,argv[3],argv[4],argv[7],
                                               tag,sizeof(tag),&req,job->server_idx,
                                               job->bundle_idx,job->local_indices,
@@ -1038,6 +1050,12 @@ int main(int argc, char **argv) {
                                               &job->verify_core_total,
                                               &job->verify_total);
       }
+#if defined(_OPENMP) && LEOPARD_PARALLEL_VERIFY_REPLIES && defined(LEOPARD_VERIFY_BUDGETED_THREADS) && LEOPARD_VERIFY_BUDGETED_THREADS
+      omp_set_num_threads(saved_threads);
+      omp_set_max_active_levels(saved_levels);
+      omp_set_dynamic(saved_dynamic);
+      printf("verify_outer_threads=%d\nverify_inner_threads=%d\n",outer_threads,inner_threads);
+#endif
       for(ji=0;ji<jobs.count;ji++) {
         if(jobs.jobs[ji].rc != 0) {
           rc = 1;

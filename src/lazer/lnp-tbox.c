@@ -2126,6 +2126,10 @@ __shuffleautovecsparse (spolyvec_t r)
  * [[a,b],[c,d]] -> auto([[d,c],[b,a]])
  * r != a
  */
+#if defined(LAZER_AFFINE_FUSED) && LAZER_AFFINE_FUSED
+#include "fused.h"
+#endif
+
 static void
 __shuffleauto2x2submatssparse (spolymat_t a)
 {
@@ -2138,7 +2142,10 @@ __shuffleauto2x2submatssparse (spolymat_t a)
 
   DEBUG_PRINTF (DEBUG_PRINT_FUNCTION_ENTRY, "%s begin", __func__);
 
-  _SMAT_FOREACH_ELEM (a, i)
+#if defined(LAZER_AFFINE_FUSED) && LAZER_AFFINE_FUSED && defined(_OPENMP)
+#pragma omp parallel for schedule(static) private(ap,arow,acol) if(a->nelems>=256 && nizk2_parallel_allowed())
+#endif
+  for(i=0;i<a->nelems;i++)
   {
     ap = spolymat_get_elem (a, i);
     arow = spolymat_get_row (a, i);
@@ -2222,19 +2229,26 @@ __schwartz_zippel_accumulate (spolymat_ptr R2i, spolyvec_ptr r1i, poly_ptr r0i,
 
   /* R2i */
 
-  spolymat_set (t0, R2i);
-  for (j = 0; j < M; j++)
+  int fused = 0;
+#if defined(LAZER_AFFINE_FUSED) && LAZER_AFFINE_FUSED
+  if(M == 1) fused = nizk2_sparse_accumulate(R2i,Rprime2i[0],intvec_get_elem(v,0));
+#endif
+  if (!fused)
     {
-      if (Rprime2i[j] == NULL)
-        continue;
+      spolymat_set (t0, R2i);
+      for (j = 0; j < M; j++)
+        {
+          if (Rprime2i[j] == NULL)
+            continue;
 
-      spolymat_fromcrt (Rprime2i[j]);
+          spolymat_fromcrt (Rprime2i[j]);
 
-      spolymat_scale (t1, intvec_get_elem (v, j), Rprime2i[j]);
-      spolymat_add (t2, t0, t1, 0);
-      spolymat_set (t0, t2);
+          spolymat_scale (t1, intvec_get_elem (v, j), Rprime2i[j]);
+          spolymat_add (t2, t0, t1, 0);
+          spolymat_set (t0, t2);
+        }
+      spolymat_mod (R2i, t0);
     }
-  spolymat_mod (R2i, t0);
 
   /* r1i */
 
@@ -2307,18 +2321,25 @@ __schwartz_zippel_accumulate_ (spolymat_ptr R2i, spolyvec_ptr r1i,
 
   /* R2i */
 
-  spolymat_set (t0, R2i);
-  for (j = 0; j < M; j++)
+  int fused = 0;
+#if defined(LAZER_AFFINE_FUSED) && LAZER_AFFINE_FUSED
+  if(M == 1) fused = nizk2_sparse_accumulate(R2i,Rprime2i[0],NULL);
+#endif
+  if (!fused)
     {
-      if (Rprime2i[j] == NULL)
-        continue;
+      spolymat_set (t0, R2i);
+      for (j = 0; j < M; j++)
+        {
+          if (Rprime2i[j] == NULL)
+            continue;
 
-      spolymat_fromcrt (Rprime2i[j]);
+          spolymat_fromcrt (Rprime2i[j]);
 
-      spolymat_add (t2, t0, Rprime2i[j], 0);
-      spolymat_set (t0, t2);
+          spolymat_add (t2, t0, Rprime2i[j], 0);
+          spolymat_set (t0, t2);
+        }
+      spolymat_mod (R2i, t0);
     }
-  spolymat_mod (R2i, t0);
 
   /* r1i */
 
@@ -2930,6 +2951,10 @@ _lnp_selector_gram (unsigned int *weights, polymat_t E)
   return ok;
 }
 
+#if defined(LAZER_AFFINE_GRAM_FAST) && LAZER_AFFINE_GRAM_FAST
+#include "affine-gram.h"
+#endif
+
 static void
 __schwartz_zippel_accumulate_l2 (spolymat_ptr R2i[], spolyvec_ptr r1i[],
                                  poly_ptr r0i[], spolymat_ptr R2i2[],
@@ -3030,6 +3055,15 @@ __schwartz_zippel_accumulate_l2 (spolymat_ptr R2i[], spolyvec_ptr r1i[],
           && (Em == NULL || Em[i] == NULL) && (v == NULL || v[i] == NULL)
           && getenv("LNP_DISABLE_SELECTOR_GRAM") == NULL
           && _lnp_selector_gram(selector_weights,Es[i]);
+      int affine_gram = 0;
+#if defined(LAZER_AFFINE_GRAM_FAST) && LAZER_AFFINE_GRAM_FAST
+      affine_gram = !selector_gram && getenv("LNP_DISABLE_AFFINE_GRAM") == NULL;
+      if(affine_gram)
+        layout_affine_gram(R2t,r1t,Es ? Es[i] : NULL,Em ? Em[i] : NULL,
+                          v ? v[i] : NULL,Es && Es[i] ? oEs[i] : NULL,
+                          Em && Em[i] ? oEm[i] : NULL,v && v[i] ? ov[i] : NULL,
+                          m1,l,Z,ni[i],Rq);
+#endif
       if(selector_gram) {
         for(k=0;k<m1;k++) if(selector_weights[k]) {
           poly = spolymat_insert_elem(R2t,2*k,2*k+1);
@@ -3037,7 +3071,7 @@ __schwartz_zippel_accumulate_l2 (spolymat_ptr R2i[], spolyvec_ptr r1i[],
           int_set_i64(poly_get_coeff(poly,0),selector_weights[k]);
         }
       }
-      else if (Es != NULL && Es[i] != NULL)
+      else if (!affine_gram && Es != NULL && Es[i] != NULL)
         {
           for (k = 0; k < m1; k++)
             {
@@ -3075,7 +3109,7 @@ __schwartz_zippel_accumulate_l2 (spolymat_ptr R2i[], spolyvec_ptr r1i[],
             }
         }
 
-      if (Em != NULL && Em[i] != NULL)
+      if (!affine_gram && Em != NULL && Em[i] != NULL)
         {
           for (k = 0; k < l; k++)
             {
@@ -3113,7 +3147,7 @@ __schwartz_zippel_accumulate_l2 (spolymat_ptr R2i[], spolyvec_ptr r1i[],
             }
         }
 
-      if (v != NULL && v[i] != NULL)
+      if (!affine_gram && v != NULL && v[i] != NULL)
         {
           // XXXpolyvec_auto (subv2, v[i]);
 
@@ -3530,6 +3564,11 @@ __schwartz_zippel_accumulate_z3 (
   intvec_ptr vRvi[Z];
   intvec_ptr vi_[Z];
 
+#if defined(LAZER_AFFINE_GRAM_OPT) && LAZER_AFFINE_GRAM_OPT
+  struct timespec affine_marks[4];
+  clock_gettime(CLOCK_MONOTONIC,&affine_marks[0]);
+#endif
+
   // printf ("u:\n");
   // polyvec_dump (u);
   // printf ("z3:\n");
@@ -3710,6 +3749,10 @@ __schwartz_zippel_accumulate_z3 (
         }
     }
 
+#if defined(LAZER_AFFINE_GRAM_OPT) && LAZER_AFFINE_GRAM_OPT
+  clock_gettime(CLOCK_MONOTONIC,&affine_marks[1]);
+#endif
+
   if (Ps != NULL)
     {
       // XXXpolymat_auto (subm, Ps);
@@ -3798,6 +3841,10 @@ __schwartz_zippel_accumulate_z3 (
   // polymat_dump (vRPs);
   // printf ("vRPm:\n");
   // polymat_dump (vRPm);
+
+#if defined(LAZER_AFFINE_GRAM_OPT) && LAZER_AFFINE_GRAM_OPT
+  clock_gettime(CLOCK_MONOTONIC,&affine_marks[2]);
+#endif
 
   for (k = 0; k < lambda; k++)
     {
@@ -3961,6 +4008,16 @@ __schwartz_zippel_accumulate_z3 (
   if (l > 0)
     polymat_free (vRPm);
   polymat_free (vRpol);
+#if defined(LAZER_AFFINE_GRAM_OPT) && LAZER_AFFINE_GRAM_OPT
+  clock_gettime(CLOCK_MONOTONIC,&affine_marks[3]);
+  if(getenv("NIZK2_AFFINE_PROFILE")) {
+    fprintf(stderr,"affine z3 phases");
+    for(unsigned int phase=0;phase<3;phase++)
+      fprintf(stderr," %.6f",affine_marks[phase+1].tv_sec-affine_marks[phase].tv_sec+
+        1e-9*(affine_marks[phase+1].tv_nsec-affine_marks[phase].tv_nsec));
+    fputc('\n',stderr);
+  }
+#endif
   for (i = 0; i < Z; i++)
     {
       if (Es != NULL && Es[i] != NULL)

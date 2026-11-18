@@ -2,7 +2,7 @@
 // 
 // protocol is statistically complete with correctness error >= 1 - 2^(-3)
 // protocol is simulatable under MLWE(45,64,[-1,1])
-// protocol is knowledge-sound with knowledge error <= 2^(-128.0) under MSIS(15,372,2^(41.31275))
+// protocol is knowledge-sound with knowledge error <= 2^(-128.0) under MSIS(15,243,2^(40.855625))
 // 
 // Ring
 // degree d = 64
@@ -14,7 +14,7 @@
 // gamma = 17299444, log(gamma) ~ 24.044222
 // 
 // Dimensions of secrets
-// s1: m1 = 263
+// s1: m1 = 134
 // m: l = 42
 // s2: m2 = 109
 // 
@@ -44,12 +44,12 @@
 // 
 // Security
 // MSIS dimension: 15
-// MSIS root hermite factor: 1.004288
+// MSIS root hermite factor: 1.0041935
 // MLWE dimension: 45
 // MLWE root hermite factor: 1.0043905
 // 
 // Proof size
-// ~ 104.513671875000 KiB
+// ~ 77.3027343750000 KiB
 // 
 // 50 bit moduli for degree 64: [1125899906840833, 1125899906839937, 1125899906837633, 1125899906826241]
 // bit length of products: [49, 99, 149, 199]
@@ -121,29 +121,13 @@ static const int_srcptr _params_l2Bsq[] = {_params_l2Bsq0, _params_l2Bsq1, _para
 static const int_srcptr _params_Ppmodq[] = {_params_Ppmodq_0, _params_Ppmodq_1, _params_Ppmodq_2, _params_Ppmodq_3};
 static const polyring_t _params_ring = {{_params_q, 64, 72, 6, moduli_d64, 4, _params_Pmodq, _params_Ppmodq, _params_inv2}};
 static const dcompress_params_t _params_dcomp = {{ _params_q, _params_qminus1, _params_m, _params_mby2, _params_gamma, _params_gammaby2, _params_pow2D, _params_pow2Dby2, 16, 1, 48 }};
-static const abdlop_params_t _params_tbox = {{ _params_ring, _params_dcomp, 267, 109, 42, 7, 15, _params_Bsq, 1, 8, 5, 140, 1, 23, _params_scM1, _params_stdev1sq, 2, 13, _params_scM2, _params_stdev2sq}};
-static const abdlop_params_t _params_quad_eval_ = {{ _params_ring, _params_dcomp, 267, 109, 47, 2, 15, _params_Bsq, 1, 8, 5, 140, 1, 23, _params_scM1, _params_stdev1sq, 2, 13, _params_scM2, _params_stdev2sq}};
-static const abdlop_params_t _params_quad_many_ = {{ _params_ring, _params_dcomp, 267, 109, 48, 1, 15, _params_Bsq, 1, 8, 5, 140, 1, 23, _params_scM1, _params_stdev1sq, 2, 13, _params_scM2, _params_stdev2sq}};
+static const abdlop_params_t _params_tbox = {{ _params_ring, _params_dcomp, 138, 109, 42, 7, 15, _params_Bsq, 1, 8, 5, 140, 1, 23, _params_scM1, _params_stdev1sq, 2, 13, _params_scM2, _params_stdev2sq}};
+static const abdlop_params_t _params_quad_eval_ = {{ _params_ring, _params_dcomp, 138, 109, 47, 2, 15, _params_Bsq, 1, 8, 5, 140, 1, 23, _params_scM1, _params_stdev1sq, 2, 13, _params_scM2, _params_stdev2sq}};
+static const abdlop_params_t _params_quad_many_ = {{ _params_ring, _params_dcomp, 138, 109, 48, 1, 15, _params_Bsq, 1, 8, 5, 140, 1, 23, _params_scM1, _params_stdev1sq, 2, 13, _params_scM2, _params_stdev2sq}};
 static const lnp_quad_eval_params_t _params_quad_eval = {{ _params_quad_eval_, _params_quad_many_, 2}};
-static const lnp_tbox_params_t _params = {{ _params_tbox, _params_quad_eval, 0, _params_n, 0, 4, 267, 2, 19, _params_scM3, _params_stdev3sq, 2, 6, _params_scM4, _params_stdev4sq, _params_Bz3sqr, _params_Bz4, &_params_l2Bsq[0], _params_inv4, 107022UL }};
+static const lnp_tbox_params_t _params = {{ _params_tbox, _params_quad_eval, 0, _params_n, 0, 4, 267, 2, 19, _params_scM3, _params_stdev3sq, 2, 6, _params_scM4, _params_stdev4sq, _params_Bz3sqr, _params_Bz4, &_params_l2Bsq[0], _params_inv4, 79158UL }};
 
-// exact main-ring equations: 217; ARP quotient rows: 0
-// full-message double commitment: a=68719476735, error<=16*sqrt(5761)*sqrt(174)
-// extraction: 2E<a and 2(a+1)E<q; key block is unbounded
-#define NIZK2_FIXED_L2_HASH_AVAILABLE 1
-static const unsigned char nizk2_fixed_l2_hash[32] = { 30, 84, 174, 204, 145, 164, 229, 207, 208, 52, 112, 245, 109, 69, 205, 47, 102, 151, 193, 150, 221, 191, 122, 53, 198, 92, 55, 101, 225, 82, 58, 118 };
-static const unsigned int params_Es0[174] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173};
-static const unsigned int params_Es1[87] = {174, 175, 176, 177, 178, 179, 180, 181, 182, 183, 184, 185, 186, 187, 188, 189, 190, 191, 192, 193, 194, 195, 196, 197, 198, 199, 200, 201, 202, 203, 204, 205, 206, 207, 208, 209, 210, 211, 212, 213, 214, 215, 216, 217, 218, 219, 220, 221, 222, 223, 224, 225, 226, 227, 228, 229, 230, 231, 232, 233, 234, 235, 236, 237, 238, 239, 240, 241, 242, 243, 244, 245, 246, 247, 248, 249, 250, 251, 252, 253, 254, 255, 256, 257, 258, 259, 260};
-static const unsigned int params_Es2[1] = {261};
-static const unsigned int params_Es3[1] = {262};
-static const unsigned int *params_Es[4] = { params_Es0, params_Es1, params_Es2, params_Es3, };
-static const unsigned int params_Es_nrows[4] = {174, 87, 1, 1};
-static const unsigned int params_m_indices[42] = {174, 175, 176, 177, 178, 179, 180, 181, 182, 183, 184, 185, 186, 187, 188, 189, 190, 191, 192, 193, 194, 195, 196, 197, 198, 199, 200, 201, 202, 203, 204, 205, 206, 207, 208, 209, 210, 211, 212, 213, 214, 215};
-
-static const limb_t params_p_limbs[] = {18446744073709551509UL, 255UL};
-static const int_t params_p = {{(limb_t *)params_p_limbs, 2, 0}};
-static const limb_t params_pinv_limbs[] = {1UL, 0UL};
-static const int_t params_pinv = {{(limb_t *)params_pinv_limbs, 2, 0}};
-static const unsigned int params_s1_indices[263] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 216, 217, 218, 219, 220, 221, 222, 223, 224, 225, 226, 227, 228, 229, 230, 231, 232, 233, 234, 235, 236, 237, 238, 239, 240, 241, 242, 243, 244, 245, 246, 247, 248, 249, 250, 251, 252, 253, 254, 255, 256, 257, 258, 259, 260, 261, 262, 263, 264, 265, 266, 267, 268, 269, 270, 271, 272, 273, 274, 275, 276, 277, 278, 279, 280, 281, 282, 283, 284, 285, 286, 287, 288, 289, 290, 291, 292, 293, 294, 295, 296, 297, 298, 299, 300, 301, 302, 303, 304};
-static const lin_params_t params = {{ _params, 64, params_p, params_pinv, 1, params_s1_indices, 263, params_m_indices, 42, NULL, 0, params_Es, params_Es_nrows, NULL, NULL, 1 }};
-
+#define NIZK2_IMPLICIT_OPENING 1
+#define NIZK2_KEY_BITS 0
+#define NIZK2_KEY_DIGITS 0
+static const lin_params_t params = {{ .tbox_params = _params, .ns1_indices = 134, .nm_indices = 42 }};
